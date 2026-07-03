@@ -1,0 +1,39 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "note-caledar",
+          "appId": "1:684820013477:android:b6375ebc58550a5621884c",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "note-caledar",
+          "configurations": {
+            "android": "1:684820013477:android:b6375ebc58550a5621884c",
+            "ios": "1:684820013477:ios:e536b0b67663d8d221884c",
+            "macos": "1:684820013477:ios:e536b0b67663d8d221884c",
+            "web": "1:684820013477:web:d37768ff80a5fb3121884c",
+            "windows": "1:684820013477:web:f43582010da4edcb21884c"
+          }
+        }
+      }
+    }
+  },
+  "hosting": {
+    "public": "build/web",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  }
+}
