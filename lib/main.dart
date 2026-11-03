@@ -4,11 +4,14 @@ import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_quill/flutter_quill.dart';
+import 'package:flutter_quill/quill_delta.dart';
 import 'package:table_calendar/table_calendar.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'firebase_options.dart';
 
@@ -179,6 +182,102 @@ class DividerEmbedBuilder extends EmbedBuilder {
         decoration: BoxDecoration(
           color: const Color(0xFF4A4A4A),
           borderRadius: BorderRadius.circular(1),
+        ),
+      ),
+    );
+  }
+}
+
+/// Верхняя строка меню ссылки: адрес; клик копирует его в буфер обмена
+/// и рядом на секунду показывает плашку «Скопировано». Меню не закрывается.
+class _CopyUrlEntry extends PopupMenuEntry<String> {
+  const _CopyUrlEntry(this.url);
+  final String url;
+
+  @override
+  double get height => 36;
+
+  @override
+  bool represents(String? value) => false;
+
+  @override
+  State<_CopyUrlEntry> createState() => _CopyUrlEntryState();
+}
+
+class _CopyUrlEntryState extends State<_CopyUrlEntry> {
+  bool _copied = false;
+  Timer? _hide;
+
+  Future<void> _copy() async {
+    try {
+      await Clipboard.setData(ClipboardData(text: widget.url));
+    } catch (_) {
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _copied = true);
+    _hide?.cancel();
+    _hide = Timer(const Duration(milliseconds: 1400), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _hide?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'Нажмите, чтобы скопировать',
+      waitDuration: const Duration(milliseconds: 600),
+      child: InkWell(
+        onTap: _copy,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 300),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    widget.url,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFF5AB0FF),
+                      fontSize: 13,
+                      decoration: TextDecoration.underline,
+                      decorationColor: Color(0xFF5AB0FF),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                AnimatedOpacity(
+                  opacity: _copied ? 1 : 0,
+                  duration: const Duration(milliseconds: 150),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: kAccent,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Text(
+                      'Скопировано',
+                      style: TextStyle(
+                        color: kBackground,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -583,6 +682,7 @@ class _CalendarPageState extends State<CalendarPage>
     final st = _controller.document.collectStyle(o - 1, 1);
     if (st.attributes[Attribute.list.key]?.value != 'ordered') return;
     if (st.attributes.containsKey(Attribute.color.key)) return;
+    if (st.attributes.containsKey(Attribute.link.key)) return; // ссылки не красим
 
     _recoloring = true;
     try {
@@ -624,12 +724,16 @@ class _CalendarPageState extends State<CalendarPage>
     }
 
     if (ctrl && !shift && !alt) {
-      // Ctrl+V поверх выделенного текста: если в буфере ссылка — текст
-      // остаётся, но становится гиперссылкой
-      if (physical == PhysicalKeyboardKey.keyV &&
-          event is KeyDownEvent &&
-          !_controller.selection.isCollapsed) {
-        _pasteOverSelection();
+      // Ctrl+V: ссылка из буфера ложится на выделенный текст или
+      // вставляется как ссылка; всё остальное — обычная вставка Quill.
+      // Буфер в вебе читается асинхронно, поэтому сразу отвечаем «handled».
+      if (physical == PhysicalKeyboardKey.keyV) {
+        if (event is KeyDownEvent) _smartPaste();
+        return KeyEventResult.handled;
+      }
+      // Ctrl+K — диалог «текст + адрес»
+      if (physical == PhysicalKeyboardKey.keyK) {
+        if (event is KeyDownEvent) _insertLink();
         return KeyEventResult.handled;
       }
       return KeyEventResult.ignored;
@@ -776,38 +880,185 @@ class _CalendarPageState extends State<CalendarPage>
     }
   }
 
-  // ---------- вставка из буфера обмена поверх выделения ----------
+  // ---------- ссылки (как в Slack) ----------
 
-  Future<void> _pasteOverSelection() async {
+  /// Ctrl+V. Буфер в вебе читается асинхронно (и с разрешения браузера),
+  /// поэтому всё делаем после ответа «handled». Ошибка чтения — ничего не делаем.
+  Future<void> _smartPaste() async {
     final sel = _controller.selection;
-    final start = sel.start;
-    final len = sel.end - sel.start;
+    if (!sel.isValid) return;
+    final doc = _controller.document;
+
     String? text;
     try {
       text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
     } catch (_) {
       return;
     }
-    if (text == null || text.isEmpty) return;
+    if (!mounted) return;
 
     final url = _asUrl(text);
     if (url != null) {
-      // текст остаётся, становится ссылкой (синей и подчёркнутой)
-      _controller.formatText(start, len, Attribute.clone(Attribute.color, null));
-      _controller.formatText(start, len, LinkAttribute(url));
-      _controller.updateSelection(
-        TextSelection.collapsed(offset: start + len),
-        ChangeSource.local,
-      );
-    } else {
-      _controller.replaceText(
-        start,
-        len,
-        text,
-        TextSelection.collapsed(offset: start + text.length),
-      );
+      // пока читали буфер, могли переключить день или сдвинуть курсор
+      if (!identical(doc, _controller.document) || _controller.selection != sel) {
+        return;
+      }
+      // с выделением: текст остаётся и становится ссылкой;
+      // без выделения: вставляется сам адрес как ссылка
+      _applyLink(sel.start, sel.end - sel.start, text!.trim(), url);
+      return;
     }
+
+    // не ссылка — обычная вставка редактора (замена выделения, форматирование и т.д.)
+    try {
+      // тот же метод, который Quill сам вызывает на Ctrl+V
+      // ignore: experimental_member_use
+      await _controller.clipboardPaste();
+    } catch (_) {}
+  }
+
+  /// Ссылка на диапазон [start, start+len) или вставка [label] в позицию [start].
+  /// Цвет с текста снимается. Всё делается одной правкой — один шаг Ctrl+Z.
+  void _applyLink(int start, int len, String label, String url) {
+    final docLen = _controller.document.length;
+    if (start < 0 || start + len > docLen - 1) return;
+
+    int caret;
+    if (len > 0) {
+      _composeOneStep(_inlineDelta(start, len, {
+        Attribute.color.key: null,
+        Attribute.link.key: url,
+      }));
+      caret = start + len;
+    } else {
+      if (label.isEmpty) return;
+      _composeOneStep(
+          Delta()..retain(start)..insert(label, {Attribute.link.key: url}));
+      caret = start + label.length;
+    }
+    _controller.updateSelection(
+      TextSelection.collapsed(offset: caret),
+      ChangeSource.local,
+    );
     _editorFocus.requestFocus();
+  }
+
+  /// Delta, которая накладывает inline-атрибуты на текст диапазона,
+  /// пропуская переносы строк и разделители
+  Delta _inlineDelta(int start, int len, Map<String, dynamic> attrs) {
+    final plain = _controller.document.toPlainText();
+    final end = min(start + len, plain.length - 1);
+    bool isSkip(int i) => plain[i] == '\n' || plain[i] == '￼';
+
+    final delta = Delta()..retain(start);
+    var i = start;
+    while (i < end) {
+      final skip = isSkip(i);
+      var j = i;
+      while (j < end && isSkip(j) == skip) {
+        j++;
+      }
+      if (skip) {
+        delta.retain(j - i);
+      } else {
+        delta.retain(j - i, attrs);
+      }
+      i = j;
+    }
+    return delta;
+  }
+
+  void _composeOneStep(Delta delta) {
+    _controller.compose(delta, _controller.selection, ChangeSource.local);
+  }
+
+  /// Адрес для открытия: без схемы — добавляем https://
+  String _normalizeUrl(String raw) {
+    final s = raw.trim();
+    final asUrl = _asUrl(s);
+    if (asUrl != null) return asUrl;
+    if (s.startsWith(RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*:'))) return s;
+    return 'https://$s';
+  }
+
+  /// Открывает ссылку в новой вкладке. Вызывается синхронно из клика:
+  /// launchUrl в вебе доходит до window.open без await.
+  void _openUrl(String url) {
+    final uri = Uri.tryParse(_normalizeUrl(url));
+    if (uri == null) return;
+    launchUrl(uri, webOnlyWindowName: '_blank').catchError((_) => false);
+  }
+
+  /// Клик по ссылке в редакторе — маленькое меню вместо перехода
+  GestureRecognizer? _linkRecognizer(Attribute attribute, Leaf leaf) {
+    if (attribute.key != Attribute.link.key || attribute.value == null) {
+      return null;
+    }
+    return TapGestureRecognizer()
+      ..onTapUp = (details) => _showLinkMenu(leaf, details.globalPosition);
+  }
+
+  Future<void> _showLinkMenu(Leaf leaf, Offset globalPos) async {
+    final url = leaf.style.attributes[Attribute.link.key]?.value?.toString();
+    if (url == null || url.isEmpty) return;
+    final doc = _controller.document;
+    final range = getLinkRange(leaf);
+
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final p = overlay.globalToLocal(globalPos);
+
+    PopupMenuItem<String> item(String value, IconData icon, String title,
+            {VoidCallback? onTap}) =>
+        PopupMenuItem<String>(
+          value: value,
+          height: 40,
+          onTap: onTap,
+          child: Row(
+            children: [
+              Icon(icon, size: 18, color: kTextSecondary),
+              const SizedBox(width: 10),
+              Text(title, style: const TextStyle(color: kTextPrimary)),
+            ],
+          ),
+        );
+
+    final choice = await showMenu<String>(
+      context: context,
+      color: kCard,
+      position: RelativeRect.fromLTRB(
+        p.dx,
+        p.dy + 8,
+        overlay.size.width - p.dx,
+        overlay.size.height - p.dy,
+      ),
+      items: [
+        // клик по адресу — копирование в буфер, меню остаётся открытым
+        _CopyUrlEntry(url),
+        // открываем прямо в обработчике клика, пока браузер считает это
+        // действием пользователя
+        item('open', Icons.open_in_new, 'Открыть', onTap: () => _openUrl(url)),
+        item('edit', Icons.edit_outlined, 'Изменить'),
+        item('remove', Icons.link_off, 'Убрать ссылку'),
+      ],
+    );
+    if (!mounted || choice == null) return;
+    // пока меню было открыто, могли переключить день
+    if (!identical(doc, _controller.document)) return;
+    if (range.end > _controller.document.length - 1) return;
+
+    switch (choice) {
+      case 'open':
+        break; // уже открыто в onTap пункта меню
+      case 'edit':
+        await _insertLink(range: range, currentUrl: url);
+        break;
+      case 'remove':
+        // текст остаётся, снимается только ссылка
+        _composeOneStep(_inlineDelta(
+            range.start, range.end - range.start, {Attribute.link.key: null}));
+        _editorFocus.requestFocus();
+        break;
+    }
   }
 
   String? _asUrl(String? raw) {
@@ -853,32 +1104,57 @@ class _CalendarPageState extends State<CalendarPage>
     _editorFocus.requestFocus();
   }
 
-  Future<void> _insertLink() async {
+  /// Ctrl+K / кнопка в панели / «Изменить» в меню ссылки.
+  /// Если текст выделен (или передан [range]), поле «Текст» заполнено им
+  /// и недоступно для правки.
+  Future<void> _insertLink({TextRange? range, String? currentUrl}) async {
     final sel = _controller.selection;
-    final hasSelection = !sel.isCollapsed;
-    final urlCtrl = TextEditingController();
-    final textCtrl = TextEditingController();
+    if (range == null && !sel.isValid) return;
+    final start = range?.start ?? sel.start;
+    final len = range != null ? range.end - range.start : sel.end - sel.start;
+    final hasSelection = len > 0;
+    final doc = _controller.document;
+
+    final selectedText = hasSelection
+        ? doc
+            .toPlainText()
+            .substring(start, start + len)
+            .replaceAll('￼', '')
+            .replaceAll('\n', ' ')
+        : '';
+    final oldUrl = currentUrl ??
+        (hasSelection
+            ? doc.collectStyle(start, len).attributes[Attribute.link.key]?.value
+                as String?
+            : null);
+
+    final urlCtrl = TextEditingController(text: oldUrl ?? '');
+    final textCtrl = TextEditingController(text: selectedText);
 
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kSurface,
-        title: const Text('Вставить ссылку'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (!hasSelection)
+        title: Text(oldUrl == null ? 'Вставить ссылку' : 'Изменить ссылку'),
+        content: SizedBox(
+          width: 380,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
               TextField(
                 controller: textCtrl,
+                enabled: !hasSelection,
                 decoration: const InputDecoration(labelText: 'Текст'),
               ),
-            TextField(
-              controller: urlCtrl,
-              autofocus: true,
-              decoration:
-                  const InputDecoration(labelText: 'Адрес (https://...)'),
-            ),
-          ],
+              TextField(
+                controller: urlCtrl,
+                autofocus: true,
+                decoration:
+                    const InputDecoration(labelText: 'Адрес (https://...)'),
+                onSubmitted: (_) => Navigator.pop(ctx, true),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -886,33 +1162,26 @@ class _CalendarPageState extends State<CalendarPage>
               child: const Text('Отмена')),
           TextButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Вставить')),
+              child: Text(oldUrl == null ? 'Вставить' : 'Сохранить')),
         ],
       ),
     );
-    if (ok != true) return;
-
-    var url = urlCtrl.text.trim();
-    if (url.isEmpty) return;
-    if (!url.startsWith(RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*:'))) {
-      url = 'https://$url';
+    final rawUrl = urlCtrl.text.trim();
+    final label = textCtrl.text.trim();
+    urlCtrl.dispose();
+    textCtrl.dispose();
+    if (ok != true || !mounted) {
+      _editorFocus.requestFocus();
+      return;
     }
+    if (rawUrl.isEmpty || !identical(doc, _controller.document)) return;
 
+    final url = _normalizeUrl(rawUrl);
     if (hasSelection) {
-      _controller.formatSelection(Attribute.clone(Attribute.color, null));
-      _controller.formatSelection(LinkAttribute(url));
+      _applyLink(start, len, '', url);
     } else {
-      final text = textCtrl.text.trim().isEmpty ? url : textCtrl.text.trim();
-      final index = sel.baseOffset < 0 ? 0 : sel.baseOffset;
-      _controller.replaceText(
-        index,
-        0,
-        text,
-        TextSelection.collapsed(offset: index + text.length),
-      );
-      _controller.formatText(index, text.length, LinkAttribute(url));
+      _applyLink(start, 0, label.isEmpty ? rawUrl : label, url);
     }
-    _editorFocus.requestFocus();
   }
 
   // ---------- элементы интерфейса ----------
@@ -1006,9 +1275,9 @@ class _CalendarPageState extends State<CalendarPage>
             ),
             _toolButton(
               icon: Icons.link,
-              tooltip: 'Ссылка (или выделите текст и вставьте ссылку Ctrl+V)',
+              tooltip: 'Ссылка (Ctrl+K, или выделите текст и вставьте ссылку Ctrl+V)',
               active: hasLink,
-              onPressed: _insertLink,
+              onPressed: () => _insertLink(),
             ),
             _vDivider(),
             _colorDot(kRed, 'Красный'),
@@ -1259,6 +1528,8 @@ class _CalendarPageState extends State<CalendarPage>
                   padding: EdgeInsets.zero,
                   expands: true,
                   embedBuilders: const [DividerEmbedBuilder()],
+                  // клик по ссылке — меню «Открыть / Изменить / Убрать ссылку»
+                  customRecognizerBuilder: _linkRecognizer,
                   customStyles: DefaultStyles(
                     link: const TextStyle(
                       color: Color(0xFF5AB0FF),
