@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -15,6 +16,7 @@ import 'package:flutter_quill/quill_delta.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'backup.dart';
 import 'firebase_options.dart';
 
 void main() {
@@ -930,14 +932,45 @@ class _CalendarPageState extends State<CalendarPage>
 
   bool _signingOut = false;
 
-  Widget _accountMenu() {
+  /// Меню в правом верхнем углу: копия, восстановление, выход
+  Widget _appMenu() {
     final email = FirebaseAuth.instance.currentUser?.email ?? '';
+    PopupMenuItem<String> item(String value, IconData icon, String title) =>
+        PopupMenuItem<String>(
+          value: value,
+          height: 40,
+          child: Row(
+            children: [
+              Icon(icon, size: 18, color: kAccent),
+              const SizedBox(width: 10),
+              Text(title, style: const TextStyle(color: kTextPrimary)),
+            ],
+          ),
+        );
+
     return PopupMenuButton<String>(
-      tooltip: 'Аккаунт',
+      tooltip: _backupBusy ? 'Идёт работа с резервной копией' : 'Меню',
+      enabled: !_backupBusy, // пока идёт копия/восстановление — меню закрыто
       color: kCard,
-      icon: const Icon(Icons.account_circle_outlined, color: kTextSecondary),
+      icon: _backupBusy
+          ? const SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.menu, color: kTextSecondary),
       onSelected: (v) {
-        if (v == 'logout') _signOut();
+        switch (v) {
+          case 'backup':
+            _createBackup();
+            break;
+          case 'restore':
+            _restoreBackup();
+            break;
+          case 'logout':
+            _signOut();
+            break;
+        }
       },
       itemBuilder: (_) => [
         if (email.isNotEmpty)
@@ -947,6 +980,9 @@ class _CalendarPageState extends State<CalendarPage>
             child: Text(email,
                 style: const TextStyle(color: kTextSecondary, fontSize: 13)),
           ),
+        item('backup', Icons.download_outlined, 'Создать резервную копию'),
+        item('restore', Icons.upload_outlined, 'Восстановить из копии'),
+        const PopupMenuDivider(),
         const PopupMenuItem<String>(
           value: 'logout',
           height: 40,
@@ -960,6 +996,313 @@ class _CalendarPageState extends State<CalendarPage>
         ),
       ],
     );
+  }
+
+  // ---------- резервная копия ----------
+
+  bool _backupBusy = false;
+
+  /// Дожидается текущего сохранения и сохраняет несохранённые правки.
+  /// false — правки сохранить не удалось.
+  Future<bool> _flushPendingSave() async {
+    for (var i = 0; _saving && i < 300; i++) {
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    if (_saving) return false;
+    if (_loadedKey == _dayKey(_selectedDay) && _isDirty) {
+      await _saveNote();
+    }
+    return !(_loadedKey == _dayKey(_selectedDay) && _isDirty);
+  }
+
+  Future<void> _showMessage(String title, String body,
+      {bool error = false}) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: kSurface,
+        title: Row(
+          children: [
+            Icon(error ? Icons.error_outline : Icons.check_circle_outline,
+                color: error ? const Color(0xFFFF5C5C) : kAccent),
+            const SizedBox(width: 10),
+            Expanded(child: Text(title)),
+          ],
+        ),
+        content: Text(body, style: const TextStyle(color: kTextPrimary)),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
+        ],
+      ),
+    );
+  }
+
+  DateTime _localToday() {
+    final now = DateTime.now(); // локальная дата устройства
+    return DateTime(now.year, now.month, now.day);
+  }
+
+  Future<void> _createBackup() async {
+    if (_backupBusy) return;
+    final notes = _notes;
+    if (notes == null) return;
+    setState(() => _backupBusy = true);
+    try {
+      if (!await _flushPendingSave()) {
+        await _showMessage(
+            'Копия не создана',
+            'Не удалось сохранить текущую заметку, поэтому копия была бы '
+                'неполной. Проверьте интернет и попробуйте снова.',
+            error: true);
+        return;
+      }
+
+      final today = _localToday();
+      final from = backupDateKey(kBackupStart);
+      final to = backupDateKey(today);
+      final period = '${formatRuDate(from)} — ${formatRuDate(to)}';
+
+      List<BackupNote> list;
+      try {
+        final snap = await notes
+            .where(FieldPath.documentId, isGreaterThanOrEqualTo: from)
+            .where(FieldPath.documentId, isLessThanOrEqualTo: to)
+            .get(const GetOptions(source: Source.server))
+            .timeout(const Duration(seconds: 60));
+        list = notesForExport({for (final d in snap.docs) d.id: d.data()},
+            today: today);
+      } on BackupException catch (e) {
+        await _showMessage('Копия не создана', e.message, error: true);
+        return;
+      } catch (e) {
+        await _showMessage('Копия не создана',
+            'Не удалось получить заметки: ${describeError(e)}.',
+            error: true);
+        return;
+      }
+
+      if (list.isEmpty) {
+        await _showMessage('Нет заметок',
+            'За период $period нет сохранённых заметок. Файл не создан.');
+        return;
+      }
+
+      final name = backupFileName(today);
+      final json = encodeBackup(list,
+          today: today, createdAtUtc: DateTime.now().toUtc());
+      Uri? saved;
+      try {
+        saved = await FilePicker.saveFile(
+          fileName: name,
+          bytes: utf8.encode(json),
+          mimeType: 'application/json',
+          dialogTitle: 'Сохранить резервную копию',
+        );
+      } catch (_) {
+        await _showMessage('Копия не создана',
+            'Не удалось сохранить файл. Попробуйте ещё раз.',
+            error: true);
+        return;
+      }
+      // в браузере файл просто скачивается (saved == null); на остальных
+      // платформах null — пользователь закрыл окно сохранения
+      if (!kIsWeb && saved == null) return;
+
+      await _showMessage(
+          'Резервная копия создана',
+          'Файл: $name\n'
+              'Заметок: ${list.length}\n'
+              'Период: $period');
+    } finally {
+      if (mounted) setState(() => _backupBusy = false);
+    }
+  }
+
+  Future<bool> _confirmRestore(BackupData data) async {
+    final created = data.createdAt.toLocal();
+    final time =
+        '${created.hour.toString().padLeft(2, '0')}:${created.minute.toString().padLeft(2, '0')}';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: kSurface,
+        title: const Text('Восстановить из копии?'),
+        content: SingleChildScrollView(
+          child: Text(
+            'Копия создана: ${formatRuDate(backupDateKey(created))}, $time\n'
+            'Период: ${formatRuDate(data.from)} — ${formatRuDate(data.to)}\n'
+            'Заметок в копии: ${data.notes.length}\n\n'
+            'Способ: перезапись.\n'
+            '• Заметки за те же даты будут заменены версиями из копии.\n'
+            '• Заметки, которых нет в копии, останутся как есть.\n'
+            '• Заметки вне периода копии не изменятся.\n'
+            '• Шаблоны по дням недели не изменятся.',
+            style: const TextStyle(color: kTextPrimary, height: 1.4),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Отмена')),
+          FilledButton(
+            style: FilledButton.styleFrom(
+                backgroundColor: kAccent, foregroundColor: kBackground),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Восстановить'),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  Future<void> _restoreBackup() async {
+    if (_backupBusy) return;
+    if (_notes == null) return;
+    setState(() => _backupBusy = true);
+    var touched = false;
+    try {
+      // 1. файл
+      PlatformFile? file;
+      try {
+        file = await FilePicker.pickFile(
+          type: FileType.custom,
+          allowedExtensions: ['json'],
+          dialogTitle: 'Выберите резервную копию',
+        );
+      } catch (_) {
+        await _showMessage('Не удалось открыть файл',
+            'Окно выбора файла не открылось. Попробуйте ещё раз.',
+            error: true);
+        return;
+      }
+      if (file == null) return; // отменили выбор
+
+      String text;
+      try {
+        final size = await file.length();
+        if (size != null && size > kMaxBackupBytes) {
+          throw BackupException('Файл слишком большой для резервной копии');
+        }
+        text = utf8.decode(await file.readAsBytes());
+      } on BackupException catch (e) {
+        await _showMessage('Восстановление отменено', e.message, error: true);
+        return;
+      } catch (_) {
+        await _showMessage('Восстановление отменено',
+            'Не удалось прочитать файл: нет доступа или он не в кодировке UTF-8.',
+            error: true);
+        return;
+      }
+
+      // 2. полная проверка до любых изменений
+      BackupData data;
+      try {
+        data = parseBackup(text, today: _localToday());
+      } on BackupException catch (e) {
+        await _showMessage('Файл не подходит',
+            '${e.message}.\n\nНичего не изменено.',
+            error: true);
+        return;
+      }
+      if (data.notes.isEmpty) {
+        await _showMessage('Восстанавливать нечего',
+            'В резервной копии нет заметок. Ничего не изменено.');
+        return;
+      }
+
+      // 3. подтверждение
+      if (!mounted || !await _confirmRestore(data)) return;
+
+      // 4. сохраняем текущие правки и больше не даём их записывать
+      if (!await _flushPendingSave()) {
+        await _showMessage(
+            'Восстановление отменено',
+            'Не удалось сохранить текущую заметку. Проверьте интернет и '
+                'попробуйте снова. Ничего не изменено.',
+            error: true);
+        return;
+      }
+      final notes = _notes;
+      if (notes == null || !mounted) return;
+      touched = true;
+      _loadedKey = null; // старое содержимое редактора больше не сохранится
+
+      // 5. запись с прогрессом
+      final progress = ValueNotifier<(int, int)>((0, data.notes.length));
+      BuildContext? dialogCtx;
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) {
+          dialogCtx = ctx;
+          return PopScope(
+            canPop: false,
+            child: AlertDialog(
+              backgroundColor: kSurface,
+              title: const Text('Восстановление…'),
+              content: ValueListenableBuilder<(int, int)>(
+                valueListenable: progress,
+                builder: (_, p, _) => Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    LinearProgressIndicator(
+                      value: p.$2 == 0 ? null : p.$1 / p.$2,
+                      color: kAccent,
+                      backgroundColor: kCard,
+                    ),
+                    const SizedBox(height: 12),
+                    Text('Восстановлено ${p.$1} из ${p.$2}',
+                        style: const TextStyle(color: kTextPrimary)),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      );
+
+      final result = await runRestore(
+        FirestoreNoteStore(notes),
+        data.notes,
+        onProgress: (done, total) => progress.value = (done, total),
+      );
+
+      final c = dialogCtx;
+      if (c != null && c.mounted) Navigator.of(c).pop();
+      progress.dispose();
+
+      if (result.ok) {
+        await _showMessage('Восстановление завершено',
+            'Восстановлено заметок: ${result.written} из ${result.total}.');
+      } else {
+        final String state;
+        if (result.written == 0) {
+          state = 'Ничего не изменено.';
+        } else if (result.rolledBack) {
+          state = 'Записанные до сбоя заметки (${result.written}) '
+              'возвращены к прежнему виду.';
+        } else {
+          state = 'Восстановление выполнено частично: записано '
+              '${result.written} из ${result.total}. Вернуть прежний вид не '
+              'удалось для дат: '
+              '${result.notRolledBack.map(formatRuDate).join(', ')}.';
+        }
+        await _showMessage('Восстановление не завершено',
+            'Причина: ${result.error}.\n\n$state\n\n'
+                'Можно повторить восстановление из того же файла.',
+            error: true);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _backupBusy = false);
+        // показываем то, что теперь лежит в базе
+        if (touched) _loadNote(_selectedDay);
+      }
+    }
   }
 
   /// Выход только на этом устройстве: на других вход сохраняется.
@@ -1102,6 +1445,7 @@ class _CalendarPageState extends State<CalendarPage>
   }
 
   void _autoSave() {
+    if (_backupBusy) return; // во время копии/восстановления — ничего не пишем
     final key = _dayKey(_selectedDay);
     if (_loadedKey != key) {
       // заметка так и не загрузилась (например, нет доступа) — пробуем снова
@@ -1139,6 +1483,7 @@ class _CalendarPageState extends State<CalendarPage>
   }
 
   Future<void> _onDaySelected(DateTime selectedDay, DateTime focusedDay) async {
+    if (_backupBusy) return; // идёт копия/восстановление
     // не теряем несохранённые правки предыдущего дня
     while (_saving) {
       await Future.delayed(const Duration(milliseconds: 100));
@@ -2002,7 +2347,7 @@ class _CalendarPageState extends State<CalendarPage>
                   ),
                 ),
               ),
-              _accountMenu(),
+              _appMenu(),
             ],
           ),
           const SizedBox(height: 14),
