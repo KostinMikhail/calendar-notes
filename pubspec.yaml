@@ -19,6 +19,7 @@ dependencies:
   table_calendar: ^3.2.0
   flutter_quill: ^11.4.0
   url_launcher: ^6.3.3
+  firebase_auth: ^6.7.1
 
 dev_dependencies:
   flutter_test:

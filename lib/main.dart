@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -15,12 +17,23 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'firebase_options.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // Firebase запускается уже под экраном загрузки (см. AuthGate)
+  runApp(const MyApp());
+}
+
+/// Запуск Firebase и настройка сессии входа
+Future<void> _initFirebase() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
-  runApp(const MyApp());
+  if (kIsWeb) {
+    // Веб: сессия хранится в localStorage и переживает перезагрузку
+    // страницы и закрытие браузера. На Android/iOS Firebase сам хранит
+    // сессию между запусками.
+    await FirebaseAuth.instance.setPersistence(Persistence.LOCAL);
+  }
 }
 
 // ============================================================
@@ -437,13 +450,395 @@ class MyApp extends StatelessWidget {
         useMaterial3: true,
         fontFamily: 'sans-serif',
       ),
-      home: const CalendarPage(),
+      home: const AuthGate(),
     );
   }
 }
 
+// ============================================================
+//  Вход
+// ============================================================
+
+/// Выбирает экран по состоянию входа: загрузка → вход → календарь.
+/// Единственный источник правды — поток authStateChanges().
+class AuthGate extends StatefulWidget {
+  const AuthGate({super.key});
+
+  @override
+  State<AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<AuthGate> {
+  Stream<User?>? _authChanges;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _start();
+  }
+
+  Future<void> _start() async {
+    try {
+      await _initFirebase();
+    } catch (_) {
+      if (mounted) setState(() => _failed = true);
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _authChanges = FirebaseAuth.instance.authStateChanges());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_failed) {
+      return const _Splash(
+          message: 'Не удалось запустить приложение. Обновите страницу.');
+    }
+    final changes = _authChanges;
+    if (changes == null) return const _Splash();
+
+    return StreamBuilder<User?>(
+      stream: changes,
+      builder: (context, snap) {
+        // пока Firebase восстанавливает сессию — только индикатор,
+        // чтобы экран входа не мелькал
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const _Splash();
+        }
+        final user = snap.data;
+        if (user == null) return const LoginPage();
+        // ключ по uid: при смене пользователя состояние создаётся заново
+        return CalendarPage(key: ValueKey(user.uid), uid: user.uid);
+      },
+    );
+  }
+}
+
+class _Splash extends StatelessWidget {
+  const _Splash({this.message});
+  final String? message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: kBackground,
+      body: Center(
+        child: message == null
+            ? const SizedBox(
+                width: 28,
+                height: 28,
+                child: CircularProgressIndicator(strokeWidth: 2.5),
+              )
+            : Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(message!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: kTextSecondary)),
+              ),
+      ),
+    );
+  }
+}
+
+/// Понятный текст ошибки входа (без технических подробностей)
+String authErrorMessage(String code) {
+  switch (code) {
+    case 'invalid-credential':
+    case 'wrong-password':
+    case 'user-not-found':
+    case 'INVALID_LOGIN_CREDENTIALS':
+      return 'Неверный email или пароль';
+    case 'invalid-email':
+      return 'Некорректный формат email';
+    case 'missing-email':
+      return 'Введите email';
+    case 'missing-password':
+      return 'Введите пароль';
+    case 'network-request-failed':
+      return 'Нет связи с сервером. Проверьте интернет и попробуйте снова';
+    case 'too-many-requests':
+      return 'Слишком много попыток. Подождите немного и попробуйте снова';
+    case 'user-disabled':
+      return 'Эта учётная запись отключена';
+    case 'operation-not-allowed':
+      return 'Вход по email и паролю не включён в настройках Firebase';
+    default:
+      return 'Не удалось выполнить действие. Попробуйте ещё раз';
+  }
+}
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final _email = TextEditingController();
+  final _password = TextEditingController();
+  final _passwordFocus = FocusNode();
+  bool _obscure = true;
+  bool _busy = false;
+  String? _error;
+  String? _info;
+
+  @override
+  void dispose() {
+    _email.dispose();
+    _password.dispose();
+    _passwordFocus.dispose();
+    super.dispose();
+  }
+
+  void _show({String? error, String? info}) {
+    if (!mounted) return;
+    setState(() {
+      _error = error;
+      _info = info;
+    });
+  }
+
+  Future<void> _signIn() async {
+    if (_busy) return; // не отправляем повторный запрос
+    final email = _email.text.trim();
+    final password = _password.text;
+    if (email.isEmpty) return _show(error: 'Введите email');
+    if (password.isEmpty) return _show(error: 'Введите пароль');
+
+    setState(() {
+      _busy = true;
+      _error = null;
+      _info = null;
+    });
+    try {
+      await FirebaseAuth.instance
+          .signInWithEmailAndPassword(email: email, password: password);
+      // предложить браузеру/менеджеру паролей запомнить вход
+      TextInput.finishAutofillContext();
+      // дальше AuthGate сам откроет календарь
+    } on FirebaseAuthException catch (e) {
+      _show(error: authErrorMessage(e.code));
+    } catch (_) {
+      _show(error: authErrorMessage(''));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _resetPassword() async {
+    if (_busy) return;
+    final email = _email.text.trim();
+    if (email.isEmpty) {
+      return _show(error: 'Введите email, на который прислать ссылку для сброса');
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+      _info = null;
+    });
+    // одинаковый ответ для любого адреса — не раскрываем, есть ли такой аккаунт
+    final done =
+        'Если для $email есть учётная запись, на этот адрес отправлено письмо '
+        'со ссылкой для сброса пароля. Проверьте также папку «Спам».';
+    try {
+      await FirebaseAuth.instance.setLanguageCode('ru');
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      _show(info: done);
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'user-not-found') {
+        _show(info: done);
+      } else {
+        _show(error: authErrorMessage(e.code));
+      }
+    } catch (_) {
+      _show(error: authErrorMessage(''));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  InputDecoration _field(String label, {Widget? suffix}) => InputDecoration(
+        labelText: label,
+        labelStyle: const TextStyle(color: kTextSecondary),
+        floatingLabelStyle: const TextStyle(color: kAccent),
+        filled: true,
+        fillColor: kCard,
+        suffixIcon: suffix,
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: kDivider),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: kAccent),
+        ),
+        disabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: kDivider),
+        ),
+      );
+
+  Widget _message(String text, Color color) => Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: color.withValues(alpha: 0.4)),
+        ),
+        child: Text(text, style: TextStyle(color: color, fontSize: 13)),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: kBackground,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 380),
+              child: Container(
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: kSurface,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: kDivider),
+                ),
+                child: AutofillGroup(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.calendar_month, color: kAccent),
+                          SizedBox(width: 10),
+                          Text(
+                            'Calendar Notes',
+                            style: TextStyle(
+                              color: kAccentLight,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'Войдите, чтобы открыть заметки',
+                        style: TextStyle(color: kTextSecondary, fontSize: 13),
+                      ),
+                      const SizedBox(height: 22),
+                      TextField(
+                        controller: _email,
+                        enabled: !_busy,
+                        keyboardType: TextInputType.emailAddress,
+                        textInputAction: TextInputAction.next,
+                        autocorrect: false,
+                        autofillHints: const [
+                          AutofillHints.email,
+                          AutofillHints.username,
+                        ],
+                        style: const TextStyle(color: kTextPrimary),
+                        decoration: _field('Email'),
+                        onSubmitted: (_) => _passwordFocus.requestFocus(),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _password,
+                        focusNode: _passwordFocus,
+                        enabled: !_busy,
+                        obscureText: _obscure,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        textInputAction: TextInputAction.done,
+                        autofillHints: const [AutofillHints.password],
+                        style: const TextStyle(color: kTextPrimary),
+                        decoration: _field(
+                          'Пароль',
+                          suffix: IconButton(
+                            tooltip:
+                                _obscure ? 'Показать пароль' : 'Скрыть пароль',
+                            icon: Icon(
+                              _obscure
+                                  ? Icons.visibility_outlined
+                                  : Icons.visibility_off_outlined,
+                              color: kTextSecondary,
+                            ),
+                            onPressed: () =>
+                                setState(() => _obscure = !_obscure),
+                          ),
+                        ),
+                        onSubmitted: (_) => _signIn(),
+                      ),
+                      if (_error != null) ...[
+                        const SizedBox(height: 14),
+                        _message(_error!, const Color(0xFFFF5C5C)),
+                      ],
+                      if (_info != null) ...[
+                        const SizedBox(height: 14),
+                        _message(_info!, kAccent),
+                      ],
+                      const SizedBox(height: 18),
+                      SizedBox(
+                        height: 44,
+                        child: FilledButton(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: kAccent,
+                            foregroundColor: kBackground,
+                            disabledBackgroundColor:
+                                kAccent.withValues(alpha: 0.5),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                          ),
+                          onPressed: _busy ? null : _signIn,
+                          child: _busy
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.2,
+                                    color: kBackground,
+                                  ),
+                                )
+                              : const Text(
+                                  'Войти',
+                                  style: TextStyle(fontWeight: FontWeight.w600),
+                                ),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      TextButton(
+                        onPressed: _busy ? null : _resetPassword,
+                        style: TextButton.styleFrom(foregroundColor: kAccent),
+                        child: const Text('Забыли пароль?'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+//  Календарь и заметки
+// ============================================================
+
 class CalendarPage extends StatefulWidget {
-  const CalendarPage({super.key});
+  const CalendarPage({super.key, required this.uid});
+
+  /// uid вошедшего пользователя (из AuthGate)
+  final String uid;
 
   @override
   State<CalendarPage> createState() => _CalendarPageState();
@@ -531,7 +926,111 @@ class _CalendarPageState extends State<CalendarPage>
     if (state != AppLifecycleState.resumed) _autoSave();
   }
 
+  // ---------- аккаунт и выход ----------
+
+  bool _signingOut = false;
+
+  Widget _accountMenu() {
+    final email = FirebaseAuth.instance.currentUser?.email ?? '';
+    return PopupMenuButton<String>(
+      tooltip: 'Аккаунт',
+      color: kCard,
+      icon: const Icon(Icons.account_circle_outlined, color: kTextSecondary),
+      onSelected: (v) {
+        if (v == 'logout') _signOut();
+      },
+      itemBuilder: (_) => [
+        if (email.isNotEmpty)
+          PopupMenuItem<String>(
+            enabled: false,
+            height: 32,
+            child: Text(email,
+                style: const TextStyle(color: kTextSecondary, fontSize: 13)),
+          ),
+        const PopupMenuItem<String>(
+          value: 'logout',
+          height: 40,
+          child: Row(
+            children: [
+              Icon(Icons.logout, size: 18, color: kTextSecondary),
+              SizedBox(width: 10),
+              Text('Выйти', style: TextStyle(color: kTextPrimary)),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Выход только на этом устройстве: на других вход сохраняется.
+  /// Заметки в Firestore не трогаем.
+  Future<void> _signOut() async {
+    if (_signingOut) return;
+
+    // сначала сохраняем последние правки
+    while (_saving) {
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    if (_loadedKey == _dayKey(_selectedDay) && _isDirty) {
+      await _saveNote();
+    }
+    if (!mounted) return;
+    if (_loadedKey == _dayKey(_selectedDay) && _isDirty) {
+      final leave = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: kSurface,
+          title: const Text('Изменения не сохранены'),
+          content: const Text(
+              'Последние правки не удалось сохранить. Выйти и потерять их?'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Остаться')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Выйти')),
+          ],
+        ),
+      );
+      if (leave != true || !mounted) return;
+    }
+
+    // убираем данные пользователя из памяти, дальше никаких операций с заметками
+    _signingOut = true;
+    _autoTimer?.cancel();
+    _loadedKey = null;
+    _lastSavedJson = '';
+    _lastSeenJson = '';
+    _lastLen = 0;
+    _controller.document = Document();
+    _status.value = '';
+
+    try {
+      await FirebaseAuth.instance.signOut();
+      // AuthGate покажет экран входа, эта страница будет закрыта
+    } catch (_) {
+      if (!mounted) return;
+      _signingOut = false;
+      _autoTimer =
+          Timer.periodic(const Duration(seconds: 5), (_) => _autoSave());
+      _loadNote(_selectedDay);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось выйти. Попробуйте ещё раз')),
+      );
+    }
+  }
+
   // ---------- Firestore ----------
+
+  /// Заметки текущего пользователя: users/{uid}/notes/{yyyy-MM-dd}.
+  /// uid берётся только из Firebase Auth. Нет входа (или вошёл уже другой
+  /// пользователь) — null, и операции с заметками не выполняются.
+  CollectionReference<Map<String, dynamic>>? get _notes {
+    final user = FirebaseAuth.instance.currentUser;
+    if (_signingOut || user == null || user.uid != widget.uid) return null;
+    return _db.collection('users').doc(user.uid).collection('notes');
+  }
 
   bool _loadingNow = false;
 
@@ -548,9 +1047,12 @@ class _CalendarPageState extends State<CalendarPage>
     final key = _dayKey(day);
     _loadedKey = null; // пока не загрузили — сохранять нельзя (чтобы не затереть заметку)
 
+    final notes = _notes;
+    if (notes == null) return;
+
     DocumentSnapshot<Map<String, dynamic>> doc;
     try {
-      doc = await _db.collection('notes').doc(key).get();
+      doc = await notes.doc(key).get();
     } on FirebaseException catch (e) {
       _setStatus('Не удалось загрузить (${e.code})');
       return;
@@ -612,12 +1114,14 @@ class _CalendarPageState extends State<CalendarPage>
   Future<void> _saveNote() async {
     final key = _dayKey(_selectedDay);
     if (_loadedKey != key || _saving) return;
+    final notes = _notes;
+    if (notes == null) return;
     _saving = true;
     final json = _currentJson();
     final plain = _controller.document.toPlainText().replaceAll('\uFFFC', '');
     _setStatus('Сохранение...');
     try {
-      await _db.collection('notes').doc(key).set({
+      await notes.doc(key).set({
         'delta': json,
         'text': plain,
         'accent': _accent,
@@ -1487,7 +1991,7 @@ class _CalendarPageState extends State<CalendarPage>
                     setState(() => _calendarVisible = !_calendarVisible),
               ),
               const SizedBox(width: 6),
-              Flexible(
+              Expanded(
                 child: Text(
                   _formatDate(_selectedDay),
                   overflow: TextOverflow.ellipsis,
@@ -1498,6 +2002,7 @@ class _CalendarPageState extends State<CalendarPage>
                   ),
                 ),
               ),
+              _accountMenu(),
             ],
           ),
           const SizedBox(height: 14),

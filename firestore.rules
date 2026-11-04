@@ -1,0 +1,31 @@
+rules_version = '2';
+
+// Правила для Calendar Notes.
+// Доступ есть только к своим заметкам: users/{uid}/notes/{yyyy-MM-dd}.
+// Всё остальное (включая старую коллекцию notes) закрыто: что не разрешено
+// явно, то запрещено.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    // Формат заметки, который пишет приложение:
+    // { delta: string, text: string, accent: string, updatedAt: serverTimestamp }
+    function isValidNote(noteId) {
+      let d = request.resource.data;
+      return noteId.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && d.keys().hasOnly(['delta', 'text', 'accent', 'updatedAt'])
+        && d.delta is string && d.delta.size() <= 800000
+        && d.text is string && d.text.size() <= 200000
+        && d.accent is string && d.accent.size() <= 16
+        && d.updatedAt == request.time;
+    }
+
+    match /users/{userId}/notes/{noteId} {
+      allow read, delete: if isOwner(userId);
+      allow create, update: if isOwner(userId) && isValidNote(noteId);
+    }
+  }
+}
