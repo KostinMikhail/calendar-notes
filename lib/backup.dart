@@ -14,8 +14,16 @@ import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_quill/flutter_quill.dart' show Document;
 
+import 'topics.dart' show topicKey;
+
 const String kBackupFormat = 'calendar-notes-backup';
-const int kBackupVersion = 1;
+
+/// 1 — только заметки дней; 2 — плюс необязательный раздел topics.
+/// Файлы версии 1 читаются как раньше.
+const int kBackupVersion = 2;
+
+const int kMaxTopicTitleLength = 80;
+final RegExp _topicIdRe = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
 
 /// Первый день, который попадает в резервную копию
 final DateTime kBackupStart = DateTime(2026, 10, 1);
@@ -101,12 +109,49 @@ class BackupData {
     required this.from,
     required this.to,
     required this.notes,
+    this.topics = const [],
   });
 
   final DateTime createdAt; // UTC
   final String from;
   final String to;
   final List<BackupNote> notes;
+
+  /// Темы (только в файлах версии 2 и новее)
+  final List<BackupTopic> topics;
+}
+
+/// Тема в копии (users/{uid}/topics/{id})
+class BackupTopic {
+  const BackupTopic({
+    required this.id,
+    required this.title,
+    required this.delta,
+    required this.text,
+    required this.order,
+    this.createdAt,
+    this.updatedAt,
+  });
+
+  final String id;
+  final String title;
+  final String delta; // исходная строка Quill Delta
+  final String text;
+  final int order;
+  final String? createdAt; // ISO 8601 UTC, для справки
+  final String? updatedAt;
+
+  int get approxBytes => title.length + delta.length + text.length + 96;
+
+  Map<String, Object?> toJson() => {
+        'id': id,
+        'title': title,
+        'delta': delta,
+        'text': text,
+        'order': order,
+        'createdAt': createdAt,
+        'updatedAt': updatedAt,
+      };
 }
 
 /// Проверяет, что строка — корректный документ Quill Delta.
@@ -207,6 +252,7 @@ String encodeBackup(
   List<BackupNote> notes, {
   required DateTime today,
   required DateTime createdAtUtc,
+  List<BackupTopic> topics = const [],
 }) {
   final doc = {
     'format': kBackupFormat,
@@ -217,8 +263,57 @@ String encodeBackup(
       'to': backupDateKey(today),
     },
     'notes': [for (final n in notes) n.toJson()],
+    'topics': [for (final t in topics) t.toJson()],
   };
   return const JsonEncoder.withIndent('  ').convert(doc);
+}
+
+void _checkTopicFields(String where, BackupTopic t) {
+  if (!_topicIdRe.hasMatch(t.id)) {
+    throw BackupException('$where: неверный идентификатор темы');
+  }
+  if (t.title.trim().isEmpty || t.title.length > kMaxTopicTitleLength) {
+    throw BackupException('$where: неверное название');
+  }
+  if (t.delta.length > kMaxDeltaLength) {
+    throw BackupException('$where: тема слишком большая');
+  }
+  if (t.text.length > kMaxTextLength) {
+    throw BackupException('$where: текст темы слишком большой');
+  }
+  validateDelta(t.delta, where);
+}
+
+/// Тема из документа Firestore (поля проверяются)
+BackupTopic topicFromFirestore(String id, Map<String, dynamic> data) {
+  final title = data['title'];
+  final delta = data['delta'];
+  final text = data['text'];
+  final order = data['order'];
+  final where = 'Тема «${title is String ? title : id}»';
+  if (title is! String || delta is! String || text is! String || order is! int) {
+    throw BackupException('$where хранится в неожиданном формате');
+  }
+  final t = BackupTopic(
+    id: id,
+    title: title,
+    delta: delta,
+    text: text,
+    order: order,
+    createdAt: _timestampToIso(data['createdAt']),
+    updatedAt: _timestampToIso(data['updatedAt']),
+  );
+  _checkTopicFields(where, t);
+  return t;
+}
+
+/// Все темы для копии, в порядке списка
+List<BackupTopic> topicsForExport(Map<String, Map<String, dynamic>> docs) {
+  final list = [
+    for (final e in docs.entries) topicFromFirestore(e.key, e.value),
+  ]..sort((a, b) =>
+      a.order != b.order ? a.order.compareTo(b.order) : a.id.compareTo(b.id));
+  return list;
 }
 
 void _onlyKeys(Map m, Set<String> allowed, String where) {
@@ -266,7 +361,13 @@ BackupData parseBackup(String source, {required DateTime today}) {
     throw BackupException('Версия формата $version не поддерживается');
   }
   const where = 'Файл';
-  _onlyKeys(root, {'format', 'version', 'createdAt', 'dateRange', 'notes'},
+  _onlyKeys(
+      root,
+      {
+        'format', 'version', 'createdAt', 'dateRange', 'notes',
+        // раздел тем появился в версии 2; в файлах версии 1 его быть не может
+        if (version >= 2) 'topics',
+      },
       where);
 
   final createdRaw = _field<String>(root, 'createdAt', where);
@@ -330,7 +431,55 @@ BackupData parseBackup(String source, {required DateTime today}) {
     ));
   }
   notes.sort((a, b) => a.date.compareTo(b.date));
-  return BackupData(createdAt: createdAt.toUtc(), from: from, to: to, notes: notes);
+
+  final topics = <BackupTopic>[];
+  final rawTopics = root['topics'];
+  if (rawTopics != null) {
+    if (rawTopics is! List) {
+      throw BackupException('$where: поле «topics» неверного типа');
+    }
+    final seenIds = <String>{};
+    for (var i = 0; i < rawTopics.length; i++) {
+      final raw = rawTopics[i];
+      final at = 'Тема №${i + 1}';
+      if (raw is! Map) throw BackupException('$at: неверная структура');
+      _onlyKeys(raw,
+          {'id', 'title', 'delta', 'text', 'order', 'createdAt', 'updatedAt'},
+          at);
+      final id = _field<String>(raw, 'id', at);
+      final title = _field<String>(raw, 'title', at);
+      final w = title.trim().isEmpty ? at : 'Тема «$title»';
+      if (!seenIds.add(id)) throw BackupException('$w встречается дважды');
+      final delta = _field<String>(raw, 'delta', w);
+      final text = _field<String>(raw, 'text', w);
+      final order = _field<int>(raw, 'order', w);
+      for (final k in ['createdAt', 'updatedAt']) {
+        final v = raw[k];
+        if (v != null && (v is! String || DateTime.tryParse(v) == null)) {
+          throw BackupException('$w: неверное поле «$k»');
+        }
+      }
+      final t = BackupTopic(
+        id: id,
+        title: title,
+        delta: delta,
+        text: text,
+        order: order,
+        createdAt: raw['createdAt'] as String?,
+        updatedAt: raw['updatedAt'] as String?,
+      );
+      _checkTopicFields(w, t);
+      topics.add(t);
+    }
+    topics.sort((a, b) =>
+        a.order != b.order ? a.order.compareTo(b.order) : a.id.compareTo(b.id));
+  }
+  return BackupData(
+      createdAt: createdAt.toUtc(),
+      from: from,
+      to: to,
+      notes: notes,
+      topics: topics);
 }
 
 // ============================================================
@@ -338,12 +487,32 @@ BackupData parseBackup(String source, {required DateTime today}) {
 // ============================================================
 
 /// Запись одной заметки (note == null — удалить документ, нужно для отката)
+/// или одной темы ([NoteWrite.topic]).
 class NoteWrite {
-  const NoteWrite(this.date, this.note);
+  const NoteWrite(this.date, this.note)
+      : topic = null,
+        isTopic = false,
+        topicExisted = false;
+
+  /// Тема [id]: topic == null — удалить; [topicExisted] — документ уже есть
+  /// (обновляется, createdAt не трогается), иначе создаётся.
+  const NoteWrite.topic(String id, this.topic, {this.topicExisted = false})
+      : date = id,
+        note = null,
+        isTopic = true;
+
+  /// Дата заметки или id темы
   final String date;
   final BackupNote? note;
+  final BackupTopic? topic;
+  final bool isTopic;
+  final bool topicExisted;
 
-  int get approxBytes => note?.approxBytes ?? 64;
+  int get approxBytes =>
+      isTopic ? (topic?.approxBytes ?? 64) : (note?.approxBytes ?? 64);
+
+  /// Ключ для отчёта: дата или `t:<id>`
+  String get key => isTopic ? topicKey(date) : date;
 }
 
 /// Хранилище заметок текущего пользователя
@@ -353,6 +522,12 @@ abstract class NoteStore {
 
   /// Атомарная пакетная запись
   Future<void> commit(List<NoteWrite> writes);
+}
+
+/// Хранилище, которое умеет восстанавливать и темы
+abstract class TopicRestoreStore {
+  /// Текущие версии тем (null — темы нет)
+  Future<Map<String, BackupTopic?>> readCurrentTopics(List<String> ids);
 }
 
 /// Делит записи на пакеты в пределах лимитов Firestore
@@ -386,10 +561,11 @@ class RestoreResult {
 
   final bool ok;
   final int total;
-  final int written; // заметок, записанных до сбоя
+  final int written; // заметок и тем, записанных до сбоя
   final String? error;
   final bool rolledBack; // записанное до сбоя возвращено как было
-  final List<String> notRolledBack; // даты, которые вернуть не удалось
+  /// Что вернуть не удалось: даты заметок и `t:<id>` тем
+  final List<String> notRolledBack;
 }
 
 /// Понятный текст ошибки Firestore/сети (без технических подробностей)
@@ -424,15 +600,24 @@ String describeError(Object e) {
 Future<RestoreResult> runRestore(
   NoteStore store,
   List<BackupNote> notes, {
+  List<BackupTopic> topics = const [],
   void Function(int done, int total)? onProgress,
 }) async {
-  final total = notes.length;
+  final total = notes.length + topics.length;
   if (total == 0) return const RestoreResult(ok: true, total: 0, written: 0);
 
   final dates = [for (final n in notes) n.date];
-  Map<String, BackupNote?> before;
+  final ids = [for (final t in topics) t.id];
+  Map<String, BackupNote?> before = const {};
+  Map<String, BackupTopic?> topicsBefore = const {};
   try {
-    before = await store.readCurrent(dates);
+    if (notes.isNotEmpty) before = await store.readCurrent(dates);
+    if (topics.isNotEmpty) {
+      if (store is! TopicRestoreStore) {
+        throw StateError('topics are not supported by this store');
+      }
+      topicsBefore = await (store as TopicRestoreStore).readCurrentTopics(ids);
+    }
   } catch (e) {
     return RestoreResult(
       ok: false,
@@ -443,8 +628,12 @@ Future<RestoreResult> runRestore(
     );
   }
 
-  final batches = chunkWrites([for (final n in notes) NoteWrite(n.date, n)]);
-  final committed = <String>[];
+  final batches = chunkWrites([
+    for (final n in notes) NoteWrite(n.date, n),
+    for (final t in topics)
+      NoteWrite.topic(t.id, t, topicExisted: topicsBefore[t.id] != null),
+  ]);
+  final committed = <NoteWrite>[];
   onProgress?.call(0, total);
 
   for (final batch in batches) {
@@ -452,13 +641,19 @@ Future<RestoreResult> runRestore(
       await store.commit(batch);
     } catch (e) {
       // откат уже записанного
-      final rollback = [for (final d in committed) NoteWrite(d, before[d])];
+      final rollback = [
+        for (final w in committed)
+          if (w.isTopic)
+            NoteWrite.topic(w.date, topicsBefore[w.date], topicExisted: true)
+          else
+            NoteWrite(w.date, before[w.date]),
+      ];
       final failed = <String>[];
       for (final rb in chunkWrites(rollback)) {
         try {
           await store.commit(rb);
         } catch (_) {
-          failed.addAll(rb.map((w) => w.date));
+          failed.addAll(rb.map((w) => w.key));
         }
       }
       return RestoreResult(
@@ -470,16 +665,31 @@ Future<RestoreResult> runRestore(
         notRolledBack: failed,
       );
     }
-    committed.addAll(batch.map((w) => w.date));
+    committed.addAll(batch);
     onProgress?.call(committed.length, total);
   }
   return RestoreResult(ok: true, total: total, written: committed.length);
 }
 
-/// Хранилище на Firestore: коллекция заметок вошедшего пользователя
-class FirestoreNoteStore implements NoteStore {
-  FirestoreNoteStore(this.notes);
+/// Хранилище на Firestore: коллекции заметок (и тем) вошедшего пользователя
+class FirestoreNoteStore implements NoteStore, TopicRestoreStore {
+  FirestoreNoteStore(this.notes, {this.topics});
   final CollectionReference<Map<String, dynamic>> notes;
+  final CollectionReference<Map<String, dynamic>>? topics;
+
+  @override
+  Future<Map<String, BackupTopic?>> readCurrentTopics(List<String> ids) async {
+    final col = topics;
+    if (col == null) throw StateError('no topics collection');
+    final snaps = await Future.wait([
+      for (final id in ids)
+        col.doc(id).get(const GetOptions(source: Source.server)),
+    ]).timeout(_timeout);
+    return {
+      for (final s in snaps)
+        s.id: s.exists ? topicFromFirestore(s.id, s.data()!) : null,
+    };
+  }
 
   static const _timeout = Duration(seconds: 60);
 
@@ -502,6 +712,10 @@ class FirestoreNoteStore implements NoteStore {
   Future<void> commit(List<NoteWrite> writes) async {
     final batch = notes.firestore.batch();
     for (final w in writes) {
+      if (w.isTopic) {
+        _topicWrite(batch, w);
+        continue;
+      }
       final ref = notes.doc(w.date);
       final n = w.note;
       if (n == null) {
@@ -517,5 +731,30 @@ class FirestoreNoteStore implements NoteStore {
       }
     }
     await batch.commit().timeout(_timeout);
+  }
+
+  /// Тема: существующая — update (createdAt не трогаем, правила требуют его
+  /// неизменным), новая — set с createdAt = время сервера, null — удалить.
+  void _topicWrite(WriteBatch batch, NoteWrite w) {
+    final col = topics;
+    if (col == null) throw StateError('no topics collection');
+    final ref = col.doc(w.date);
+    final t = w.topic;
+    if (t == null) {
+      batch.delete(ref);
+      return;
+    }
+    final fields = <String, Object>{
+      'title': t.title,
+      'delta': t.delta,
+      'text': t.text,
+      'order': t.order,
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+    if (w.topicExisted) {
+      batch.update(ref, fields);
+    } else {
+      batch.set(ref, {...fields, 'createdAt': FieldValue.serverTimestamp()});
+    }
   }
 }

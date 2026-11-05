@@ -20,6 +20,7 @@ import 'main.dart'
         kTextSecondary,
         kWeekdaysShort;
 import 'search.dart';
+import 'topics.dart' show Topic, topicIdOf, topicKey;
 
 /// Видимый текст документа заметки. Если поля text нет — собирается из
 /// delta. null — текст получить не удалось (заметка пропускается).
@@ -40,10 +41,18 @@ String? noteTextFromData(Map<String, dynamic> data) {
 /// Заметки пользователя в памяти: загружаются одним запросом и живут
 /// 5 минут. Хранится только ключ дня и текст.
 class NoteSearchCache {
-  NoteSearchCache(this._load);
+  NoteSearchCache(this._load, {this.loadTopics});
 
   /// Загрузка всех документов заметок: id → поля
   final Future<Map<String, Map<String, dynamic>>> Function() _load;
+
+  /// Загрузка всех документов тем: id → поля (нужен только текст)
+  final Future<Map<String, Map<String, dynamic>>> Function()? loadTopics;
+
+  Map<String, String>? _topicTexts;
+
+  /// Тексты тем: id → текст. Названия и список тем берутся из панели тем.
+  Map<String, String> get topicTexts => _topicTexts ?? const {};
 
   static const Duration ttl = Duration(minutes: 5);
 
@@ -66,13 +75,22 @@ class NoteSearchCache {
 
   Future<void> _fetch() async {
     final docs = await _load();
+    final topicDocs = loadTopics == null
+        ? const <String, Map<String, dynamic>>{}
+        : await loadTopics!();
     final map = <String, SearchNote>{};
     docs.forEach((id, data) {
       if (!isValidDateKey(id)) return;
       final text = noteTextFromData(data);
       if (text != null) map[id] = SearchNote(id, text);
     });
+    final topics = <String, String>{};
+    topicDocs.forEach((id, data) {
+      final text = noteTextFromData(data);
+      if (text != null) topics[id] = text;
+    });
     _notes = map;
+    _topicTexts = topics;
     _loadedAt = DateTime.now();
   }
 
@@ -82,9 +100,19 @@ class NoteSearchCache {
     if (n != null) n[key] = SearchNote(key, text);
   }
 
+  /// После сохранения темы — обновить её текст (если кэш есть)
+  void putTopicText(String id, String text) {
+    final t = _topicTexts;
+    if (t != null) t[id] = text;
+  }
+
+  /// После удаления темы
+  void removeTopic(String id) => _topicTexts?.remove(id);
+
   /// После восстановления из копии — всё перечитать
   void invalidate() {
     _notes = null;
+    _topicTexts = null;
     _loadedAt = null;
   }
 }
@@ -104,6 +132,7 @@ Future<SearchPick?> showNoteSearch(
   required String? Function() liveKey,
   required String Function() liveText,
   required bool Function(String key) inCalendarRange,
+  List<Topic> Function()? topics,
 }) {
   return showDialog<SearchPick>(
     context: context,
@@ -114,6 +143,7 @@ Future<SearchPick?> showNoteSearch(
       liveKey: liveKey,
       liveText: liveText,
       inCalendarRange: inCalendarRange,
+      topics: topics,
     ),
   );
 }
@@ -126,13 +156,19 @@ class NoteSearchDialog extends StatefulWidget {
     required this.liveKey,
     required this.liveText,
     required this.inCalendarRange,
+    this.topics,
   });
 
   final NoteSearchCache cache;
   final Set<String> boilerplate;
+
+  /// Ключ открытого в редакторе: дата или `t:<id>` темы (null — не загружено)
   final String? Function() liveKey;
   final String Function() liveText;
   final bool Function(String key) inCalendarRange;
+
+  /// Текущий список тем (названия, время изменения)
+  final List<Topic> Function()? topics;
 
   @override
   State<NoteSearchDialog> createState() => _NoteSearchDialogState();
@@ -150,6 +186,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
   String? _error;
   String _applied = ''; // запрос, по которому посчитаны результаты
   List<SearchHit> _hits = const [];
+  List<TopicSearchHit> _topicHits = const []; // идут в списке первыми
   int _active = 0; // подсвеченная строка
   List<GlobalKey> _rowKeys = const [];
 
@@ -199,9 +236,32 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
   List<SearchNote> _sources() {
     final map = Map<String, SearchNote>.of(widget.cache.notes);
     final key = widget.liveKey();
-    if (key != null) map[key] = SearchNote(key, widget.liveText());
+    if (key != null && topicIdOf(key) == null) {
+      map[key] = SearchNote(key, widget.liveText());
+    }
     return map.values.toList();
   }
+
+  /// Темы для поиска: список из панели + тексты из кэша (открытая — из
+  /// редактора, с несохранёнными правками)
+  List<SearchTopic> _topicSources() {
+    final list = widget.topics?.call() ?? const <Topic>[];
+    final liveId = topicIdOf(widget.liveKey());
+    return [
+      for (final t in list)
+        SearchTopic(
+          t.id,
+          t.title,
+          t.id == liveId
+              ? widget.liveText()
+              : (widget.cache.topicTexts[t.id] ?? ''),
+          updatedAt: t.updatedAt,
+        ),
+    ];
+  }
+
+  int get _topicCount => _topicHits.length;
+  int get _total => _topicHits.length + _hits.length;
 
   void _onQueryChanged() {
     if (_query.text == _applied) return;
@@ -213,20 +273,25 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
   void _run() {
     if (!mounted) return;
     final q = _query.text;
-    final hits = (_loading || _error != null)
-        ? const <SearchHit>[]
-        : searchNotes(_sources(), q, widget.boilerplate);
+    final ready = !_loading && _error == null;
+    final hits = ready
+        ? searchNotes(_sources(), q, widget.boilerplate)
+        : const <SearchHit>[];
+    final topicHits =
+        ready ? searchTopics(_topicSources(), q) : const <TopicSearchHit>[];
     setState(() {
       _applied = q;
       _hits = hits;
+      _topicHits = topicHits;
       _rowKeys = List.generate(
-          math.min(hits.length, _maxRows), (_) => GlobalKey());
+          math.min(_total, _maxRows), (_) => GlobalKey());
       _active = _firstEnabled(0, 1) ?? 0;
     });
     if (_list.hasClients) _list.jumpTo(0);
   }
 
-  bool _enabled(int i) => widget.inCalendarRange(_hits[i].key);
+  bool _enabled(int i) =>
+      i < _topicCount || widget.inCalendarRange(_hits[i - _topicCount].key);
 
   int? _firstEnabled(int from, int step) {
     for (var i = from; i >= 0 && i < _rowKeys.length; i += step) {
@@ -252,8 +317,10 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
 
   void _open(int i) {
     if (i < 0 || i >= _rowKeys.length || !_enabled(i)) return;
-    Navigator.of(context)
-        .pop(SearchPick(_hits[i].key, queryWords(_applied)));
+    final key = i < _topicCount
+        ? topicKey(_topicHits[i].topic.id)
+        : _hits[i - _topicCount].key;
+    Navigator.of(context).pop(SearchPick(key, queryWords(_applied)));
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent e) {
@@ -287,8 +354,15 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
     if (_loading) return 'Загрузка заметок…';
     if (_error != null) return '';
     final q = _applied;
-    if (q.trim().isEmpty) return 'Заметок для поиска: ${_sources().length}';
+    final topics = widget.topics?.call().length ?? 0;
+    if (q.trim().isEmpty) {
+      return 'Заметок для поиска: ${_sources().length}'
+          '${topics > 0 ? ', тем: $topics' : ''}';
+    }
     if (!isQueryLongEnough(q)) return 'Введите минимум 2 символа';
+    if (_topicHits.isNotEmpty) {
+      return 'Найдено тем: ${_topicHits.length}, дней: ${_hits.length}';
+    }
     return 'Найдено дней: ${_hits.length}';
   }
 
@@ -362,8 +436,84 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
     );
   }
 
+  /// Название темы с подсветкой совпадений
+  Widget _titleWithHighlights(String title, List<TextRange2> ranges) {
+    const base = TextStyle(
+        color: kTextPrimary, fontSize: 14, fontWeight: FontWeight.w600);
+    final spans = <TextSpan>[];
+    var pos = 0;
+    for (final r in ranges) {
+      if (r.start > pos) spans.add(TextSpan(text: title.substring(pos, r.start)));
+      spans.add(TextSpan(
+        text: title.substring(r.start, r.end),
+        style: TextStyle(
+          color: kAccentLight,
+          backgroundColor: kAccent.withValues(alpha: 0.18),
+        ),
+      ));
+      pos = r.end;
+    }
+    if (pos < title.length) spans.add(TextSpan(text: title.substring(pos)));
+    return Text.rich(TextSpan(style: base, children: spans),
+        maxLines: 1, overflow: TextOverflow.ellipsis);
+  }
+
+  Widget _countBadge(int count) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+        decoration: BoxDecoration(
+          color: kCard,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: kDivider),
+        ),
+        child: Text(
+          pluralMatches(count),
+          style: const TextStyle(color: kTextSecondary, fontSize: 11),
+        ),
+      );
+
+  /// Строка результата-темы: значок и название вместо даты
+  Widget _topicRow(int i) {
+    final hit = _topicHits[i];
+    final active = i == _active;
+    final row = Container(
+      key: _rowKeys[i],
+      margin: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: active ? kAccent.withValues(alpha: 0.14) : Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: active ? kAccent : Colors.transparent),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.topic_outlined, size: 16, color: kAccent),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _titleWithHighlights(hit.topic.title, hit.titleRanges),
+              ),
+              if (hit.count > 1) _countBadge(hit.count),
+            ],
+          ),
+          if (hit.hits.lines.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            _snippet(buildSnippet(hit.hits.lines.first)),
+          ],
+        ],
+      ),
+    );
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _active = i),
+      child: GestureDetector(onTap: () => _open(i), child: row),
+    );
+  }
+
   Widget _row(int i) {
-    final hit = _hits[i];
+    if (i < _topicCount) return _topicRow(i);
+    final hit = _hits[i - _topicCount];
     final enabled = _enabled(i);
     final active = enabled && i == _active;
     final row = Container(
@@ -464,7 +614,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
       );
     }
     if (!isQueryLongEnough(_applied)) return const SizedBox.shrink();
-    if (_hits.isEmpty) {
+    if (_total == 0) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 24),
         child: Center(
@@ -478,13 +628,13 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
       child: ListView.builder(
         controller: _list,
         shrinkWrap: true,
-        itemCount: shown + (_hits.length > shown ? 1 : 0),
+        itemCount: shown + (_total > shown ? 1 : 0),
         itemBuilder: (_, i) {
           if (i < shown) return _row(i);
           return Padding(
             padding: const EdgeInsets.symmetric(vertical: 10),
             child: Text(
-              'Показано $shown из ${_hits.length}. Уточните запрос.',
+              'Показано $shown из $_total. Уточните запрос.',
               textAlign: TextAlign.center,
               style: const TextStyle(color: kTextSecondary, fontSize: 12),
             ),

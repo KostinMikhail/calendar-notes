@@ -214,4 +214,46 @@ void main() {
       expect(identical(n.normalized, n.normalized), isTrue);
     });
   });
+
+  group("поиск по темам", () {
+    test("слово и в дне, и в теме — находятся оба", () {
+      final days = searchNotes([SearchNote("2026-10-02", "Обсудить бюджет")], "бюджет", kBoiler);
+      final topics = searchTopics([SearchTopic("t1", "Проект X", "бюджет на квартал")], "бюджет");
+      expect(days.single.key, "2026-10-02");
+      expect(topics.single.topic.id, "t1");
+      expect(topics.single.hits.lines.single.line, "бюджет на квартал");
+    });
+
+    test("совпадение только в названии", () {
+      final r = searchTopics([SearchTopic("t1", "Идеи на ЁЛКУ", "текст")], "елку");
+      expect(r.single.titleMatch, isTrue);
+      expect(r.single.hits.lines, isEmpty);
+      expect(r.single.titleRanges.single, const TextRange2(8, 12));
+    });
+
+    test("И: слова могут быть в названии и в тексте", () {
+      final topics = [SearchTopic("t1", "Вадим", "обсудить отпуск")];
+      expect(searchTopics(topics, "вадим отпуск"), hasLength(1));
+      expect(searchTopics(topics, "вадим премия"), isEmpty);
+    });
+
+    test("строки шаблонов дня в темах ищутся", () {
+      final r = searchTopics([SearchTopic("t1", "Т", "СДК дейли:")], "СДК");
+      expect(r, hasLength(1));
+    });
+
+    test("порядок: совпадение в названии, затем недавно изменённые", () {
+      final r = searchTopics([
+        SearchTopic("old", "Заметки", "релиз", updatedAt: DateTime(2026, 10, 1)),
+        SearchTopic("none", "Без даты", "релиз"),
+        SearchTopic("new", "Разное", "релиз", updatedAt: DateTime(2026, 11, 1)),
+        SearchTopic("title", "Релиз 2.0", "план", updatedAt: DateTime(2020)),
+      ], "релиз");
+      expect(r.map((h) => h.topic.id), ["title", "new", "old", "none"]);
+    });
+
+    test("короткий запрос — ничего", () {
+      expect(searchTopics([SearchTopic("t1", "а", "а")], "а"), isEmpty);
+    });
+  });
 }

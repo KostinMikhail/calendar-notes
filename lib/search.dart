@@ -142,12 +142,14 @@ TextHits? findInText(
   List<String> words,
   Set<String> boilerplate, {
   String? normalized,
+  bool Function(String word)? foundElsewhere,
 }) {
   if (words.isEmpty) return null;
   final norm = normalized ?? normalizeForSearch(text);
   assert(norm.length == text.length);
 
-  final found = List<bool>.filled(words.length, false);
+  // [foundElsewhere] — слово уже нашлось вне текста (в названии темы)
+  final found = [for (final w in words) foundElsewhere?.call(w) ?? false];
   final lines = <LineHit>[];
   var count = 0;
   var offset = 0;
@@ -270,5 +272,62 @@ List<SearchHit> searchNotes(
     if (h != null) res.add(SearchHit(n.key, h));
   }
   res.sort((a, b) => b.key.compareTo(a.key));
+  return res;
+}
+
+// ============================================================
+//  Темы
+// ============================================================
+
+/// Тема для поиска: название и текст (нормализованные — по запросу)
+class SearchTopic {
+  SearchTopic(this.id, this.title, this.text, {this.updatedAt});
+  final String id;
+  final String title;
+  final String text;
+  final DateTime? updatedAt;
+  String? _normTitle;
+  String? _normText;
+  String get normalizedTitle => _normTitle ??= normalizeForSearch(title);
+  String get normalizedText => _normText ??= normalizeForSearch(text);
+}
+
+/// Найденная тема
+class TopicSearchHit {
+  const TopicSearchHit(this.topic, this.titleRanges, this.hits);
+  final SearchTopic topic;
+
+  /// Совпадения в названии (для подсветки)
+  final List<TextRange2> titleRanges;
+
+  /// Совпадения в тексте; lines может быть пустым, если слова нашлись
+  /// только в названии
+  final TextHits hits;
+
+  bool get titleMatch => titleRanges.isNotEmpty;
+  int get count => hits.count + titleRanges.length;
+}
+
+/// Поиск по темам: каждое слово запроса — в названии или в тексте.
+/// Сначала темы с совпадением в названии, затем недавно изменённые.
+List<TopicSearchHit> searchTopics(Iterable<SearchTopic> topics, String query) {
+  if (!isQueryLongEnough(query)) return const [];
+  final words = queryWords(query);
+  final res = <TopicSearchHit>[];
+  for (final t in topics) {
+    final nt = t.normalizedTitle;
+    final hits = findInText(t.text, words, const {},
+        normalized: t.normalizedText, foundElsewhere: nt.contains);
+    if (hits == null) continue;
+    final titleRanges = _merge([for (final w in words) ..._occurrences(nt, w)]);
+    res.add(TopicSearchHit(t, titleRanges, hits));
+  }
+  res.sort((a, b) {
+    if (a.titleMatch != b.titleMatch) return a.titleMatch ? -1 : 1;
+    final ua = a.topic.updatedAt, ub = b.topic.updatedAt;
+    if (ua != null && ub != null && ua != ub) return ub.compareTo(ua);
+    if ((ua == null) != (ub == null)) return ua == null ? 1 : -1;
+    return a.topic.title.compareTo(b.topic.title);
+  });
   return res;
 }

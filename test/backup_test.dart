@@ -142,7 +142,9 @@ void main() {
           today: today, createdAtUtc: DateTime.utc(2026, 11, 4, 18));
       final root = jsonDecode(json) as Map;
       expect(root['format'], 'calendar-notes-backup');
-      expect(root['version'], 1);
+      // версия 2: добавился необязательный раздел тем
+      expect(root['version'], 2);
+      expect(root['topics'], isEmpty);
       expect(root['createdAt'], '2026-11-04T18:00:00.000Z');
       expect(root['dateRange'], {'from': '2026-10-01', 'to': '2026-11-04'});
       expect((root['notes'] as List).length, 2);
@@ -187,7 +189,7 @@ void main() {
     });
 
     test('версия новее — понятное сообщение', () {
-      expect(() => parseBackup(backupJson(version: 2), today: today),
+      expect(() => parseBackup(backupJson(version: 3), today: today),
           throwsBackup('более новой версией'));
       expect(() => parseBackup(backupJson(version: 0), today: today),
           throwsBackup('не поддерживается'));

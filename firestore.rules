@@ -27,5 +27,36 @@ service cloud.firestore {
       allow read, delete: if isOwner(userId);
       allow create, update: if isOwner(userId) && isValidNote(noteId);
     }
+
+    // Формат темы (заметка без даты):
+    // { title: string 1..80, delta: string, text: string, order: int,
+    //   createdAt: timestamp, updatedAt: timestamp }
+    function isValidTopic(d) {
+      return d.keys().hasOnly(['title', 'delta', 'text', 'order', 'createdAt', 'updatedAt'])
+        && d.keys().hasAll(['title', 'delta', 'text', 'order', 'createdAt', 'updatedAt'])
+        && d.title is string && d.title.size() >= 1 && d.title.size() <= 80
+        && d.title.trim().size() >= 1
+        && d.delta is string && d.delta.size() <= 800000
+        && d.text is string && d.text.size() <= 200000
+        && d.order is int
+        && d.createdAt is timestamp
+        && d.updatedAt is timestamp;
+    }
+
+    match /users/{userId}/topics/{topicId} {
+      allow read, delete: if isOwner(userId);
+      // создание: оба времени — время сервера
+      allow create: if isOwner(userId)
+        && isValidTopic(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      // изменение: createdAt не меняется; updatedAt — время сервера,
+      // кроме перестановки, где меняется только order
+      allow update: if isOwner(userId)
+        && isValidTopic(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && (request.resource.data.updatedAt == request.time
+            || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['order']));
+    }
   }
 }

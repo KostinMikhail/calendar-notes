@@ -20,6 +20,8 @@ import 'backup.dart';
 import 'firebase_options.dart';
 import 'search.dart' show findInText, kObjectReplacement;
 import 'search_dialog.dart';
+import 'topics.dart';
+import 'topics_panel.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -892,6 +894,16 @@ class _CalendarPageState extends State<CalendarPage>
   int _lastLen = 0;
   String? _loadedKey; // для какого дня заметка уже загружена
   bool _saving = false;
+
+  // --- темы: открытая тема вместо дня ---
+  String? _openTopicId; // null — в центре заметка выбранного дня
+  int _loadSeq = 0; // номер последней загрузки: старые результаты не применяются
+  late final TopicsController _topics =
+      TopicsController(FirestoreTopicStore(() => _topicsRef));
+
+  /// Что сейчас открыто в редакторе: ключ дня 'yyyy-MM-dd' или `t:<id>`
+  String get _targetKey =>
+      _openTopicId != null ? topicKey(_openTopicId!) : _dayKey(_selectedDay);
   String _accent = kNotForgetColors.first;
   bool _recoloring = false;
 
@@ -929,6 +941,7 @@ class _CalendarPageState extends State<CalendarPage>
     WidgetsBinding.instance.addObserver(this);
     _controller.addListener(_onControllerChanged);
     _loadNote(_selectedDay);
+    _topics.load();
     // автосохранение каждые 5 секунд, если есть несохранённые правки
     _autoTimer = Timer.periodic(const Duration(seconds: 5), (_) => _autoSave());
   }
@@ -943,6 +956,7 @@ class _CalendarPageState extends State<CalendarPage>
     _editorFocus.dispose();
     _editorScroll.dispose();
     _status.dispose();
+    _topics.dispose();
     super.dispose();
   }
 
@@ -1033,10 +1047,10 @@ class _CalendarPageState extends State<CalendarPage>
       await Future.delayed(const Duration(milliseconds: 100));
     }
     if (_saving) return false;
-    if (_loadedKey == _dayKey(_selectedDay) && _isDirty) {
+    if (_loadedKey == _targetKey && _isDirty) {
       await _saveNote();
     }
-    return !(_loadedKey == _dayKey(_selectedDay) && _isDirty);
+    return !(_loadedKey == _targetKey && _isDirty);
   }
 
   Future<void> _showMessage(String title, String body,
@@ -1089,6 +1103,7 @@ class _CalendarPageState extends State<CalendarPage>
       final period = '${formatRuDate(from)} — ${formatRuDate(to)}';
 
       List<BackupNote> list;
+      var topicList = const <BackupTopic>[];
       try {
         final snap = await notes
             .where(FieldPath.documentId, isGreaterThanOrEqualTo: from)
@@ -1097,6 +1112,15 @@ class _CalendarPageState extends State<CalendarPage>
             .timeout(const Duration(seconds: 60));
         list = notesForExport({for (final d in snap.docs) d.id: d.data()},
             today: today);
+        // темы — все, без привязки к периоду
+        final topicsCol = _topicsRef;
+        if (topicsCol != null) {
+          final tsnap = await topicsCol
+              .get(const GetOptions(source: Source.server))
+              .timeout(const Duration(seconds: 60));
+          topicList =
+              topicsForExport({for (final d in tsnap.docs) d.id: d.data()});
+        }
       } on BackupException catch (e) {
         await _showMessage('Копия не создана', e.message, error: true);
         return;
@@ -1107,15 +1131,18 @@ class _CalendarPageState extends State<CalendarPage>
         return;
       }
 
-      if (list.isEmpty) {
+      if (list.isEmpty && topicList.isEmpty) {
         await _showMessage('Нет заметок',
-            'За период $period нет сохранённых заметок. Файл не создан.');
+            'За период $period нет сохранённых заметок, тем тоже нет. '
+                'Файл не создан.');
         return;
       }
 
       final name = backupFileName(today);
       final json = encodeBackup(list,
-          today: today, createdAtUtc: DateTime.now().toUtc());
+          topics: topicList,
+          today: today,
+          createdAtUtc: DateTime.now().toUtc());
       Uri? saved;
       try {
         saved = await FilePicker.saveFile(
@@ -1138,6 +1165,7 @@ class _CalendarPageState extends State<CalendarPage>
           'Резервная копия создана',
           'Файл: $name\n'
               'Заметок: ${list.length}\n'
+              'Тем: ${topicList.length}\n'
               'Период: $period');
     } finally {
       if (mounted) setState(() => _backupBusy = false);
@@ -1157,11 +1185,14 @@ class _CalendarPageState extends State<CalendarPage>
           child: Text(
             'Копия создана: ${formatRuDate(backupDateKey(created))}, $time\n'
             'Период: ${formatRuDate(data.from)} — ${formatRuDate(data.to)}\n'
-            'Заметок в копии: ${data.notes.length}\n\n'
+            'Заметок в копии: ${data.notes.length}\n'
+            '${data.topics.isEmpty ? '' : 'Тем в копии: ${data.topics.length}\n'}'
+            '\n'
             'Способ: перезапись.\n'
             '• Заметки за те же даты будут заменены версиями из копии.\n'
             '• Заметки, которых нет в копии, останутся как есть.\n'
             '• Заметки вне периода копии не изменятся.\n'
+            '${data.topics.isEmpty ? '' : '• Темы из копии заменят темы с тем же идентификатором или будут созданы; остальные темы не изменятся.\n'}'
             '• Шаблоны по дням недели не изменятся.',
             style: const TextStyle(color: kTextPrimary, height: 1.4),
           ),
@@ -1180,6 +1211,13 @@ class _CalendarPageState extends State<CalendarPage>
       ),
     );
     return ok == true;
+  }
+
+  /// Дата заметки или «тема «…»» для отчёта о восстановлении
+  String _restoreKeyLabel(String key) {
+    final id = topicIdOf(key);
+    if (id == null) return formatRuDate(key);
+    return 'тема «${_topics.byId(id)?.title ?? id}»';
   }
 
   Future<void> _restoreBackup() async {
@@ -1231,7 +1269,7 @@ class _CalendarPageState extends State<CalendarPage>
             error: true);
         return;
       }
-      if (data.notes.isEmpty) {
+      if (data.notes.isEmpty && data.topics.isEmpty) {
         await _showMessage('Восстанавливать нечего',
             'В резервной копии нет заметок. Ничего не изменено.');
         return;
@@ -1255,7 +1293,8 @@ class _CalendarPageState extends State<CalendarPage>
       _loadedKey = null; // старое содержимое редактора больше не сохранится
 
       // 5. запись с прогрессом
-      final progress = ValueNotifier<(int, int)>((0, data.notes.length));
+      final progress = ValueNotifier<(int, int)>(
+          (0, data.notes.length + data.topics.length));
       BuildContext? dialogCtx;
       showDialog<void>(
         context: context,
@@ -1290,8 +1329,9 @@ class _CalendarPageState extends State<CalendarPage>
       );
 
       final result = await runRestore(
-        FirestoreNoteStore(notes),
+        FirestoreNoteStore(notes, topics: _topicsRef),
         data.notes,
+        topics: data.topics,
         onProgress: (done, total) => progress.value = (done, total),
       );
 
@@ -1300,8 +1340,12 @@ class _CalendarPageState extends State<CalendarPage>
       progress.dispose();
 
       if (result.ok) {
-        await _showMessage('Восстановление завершено',
-            'Восстановлено заметок: ${result.written} из ${result.total}.');
+        await _showMessage(
+            'Восстановление завершено',
+            data.topics.isEmpty
+                ? 'Восстановлено заметок: ${result.written} из ${result.total}.'
+                : 'Восстановлено заметок: ${data.notes.length}, '
+                    'тем: ${data.topics.length}.');
       } else {
         final String state;
         if (result.written == 0) {
@@ -1312,8 +1356,8 @@ class _CalendarPageState extends State<CalendarPage>
         } else {
           state = 'Восстановление выполнено частично: записано '
               '${result.written} из ${result.total}. Вернуть прежний вид не '
-              'удалось для дат: '
-              '${result.notRolledBack.map(formatRuDate).join(', ')}.';
+              'удалось для ${data.topics.isEmpty ? 'дат' : 'записей'}: '
+              '${result.notRolledBack.map(_restoreKeyLabel).join(', ')}.';
         }
         await _showMessage('Восстановление не завершено',
             'Причина: ${result.error}.\n\n$state\n\n'
@@ -1326,7 +1370,8 @@ class _CalendarPageState extends State<CalendarPage>
         // показываем то, что теперь лежит в базе
         if (touched) {
           _searchCache.invalidate();
-          _loadNote(_selectedDay);
+          _topics.load();
+          _loadTarget();
         }
       }
     }
@@ -1341,11 +1386,11 @@ class _CalendarPageState extends State<CalendarPage>
     while (_saving) {
       await Future.delayed(const Duration(milliseconds: 100));
     }
-    if (_loadedKey == _dayKey(_selectedDay) && _isDirty) {
+    if (_loadedKey == _targetKey && _isDirty) {
       await _saveNote();
     }
     if (!mounted) return;
-    if (_loadedKey == _dayKey(_selectedDay) && _isDirty) {
+    if (_loadedKey == _targetKey && _isDirty) {
       final leave = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -1384,7 +1429,7 @@ class _CalendarPageState extends State<CalendarPage>
       _signingOut = false;
       _autoTimer =
           Timer.periodic(const Duration(seconds: 5), (_) => _autoSave());
-      _loadNote(_selectedDay);
+      _loadTarget();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Не удалось выйти. Попробуйте ещё раз')),
       );
@@ -1412,6 +1457,13 @@ class _CalendarPageState extends State<CalendarPage>
         .get(const GetOptions(source: Source.server))
         .timeout(const Duration(seconds: 30));
     return {for (final d in snap.docs) d.id: d.data()};
+  }, loadTopics: () async {
+    final topics = _topicsRef;
+    if (topics == null) throw StateError('signed out');
+    final snap = await topics
+        .get(const GetOptions(source: Source.server))
+        .timeout(const Duration(seconds: 30));
+    return {for (final d in snap.docs) d.id: d.data()};
   });
 
   /// Слова, которые нужно выделить, когда загрузится этот день
@@ -1423,18 +1475,26 @@ class _CalendarPageState extends State<CalendarPage>
       context,
       cache: _searchCache,
       boilerplate: kTemplateLines,
-      // открытый день ищем по тексту редактора — с несохранёнными правками
-      liveKey: () =>
-          _loadedKey == _dayKey(_selectedDay) ? _loadedKey : null,
+      // открытый день или тему ищем по тексту редактора — с несохранёнными
+      // правками
+      liveKey: () => _loadedKey == _targetKey ? _loadedKey : null,
       liveText: () => _controller.document.toPlainText(),
       inCalendarRange: (key) {
         final d = DateTime.parse(key);
         return !d.isBefore(kCalendarFirstDay) && !d.isAfter(kCalendarLastDay);
       },
+      topics: () => _topics.topics,
     );
     if (pick == null || !mounted) return;
-    if (_loadedKey == pick.key && _dayKey(_selectedDay) == pick.key) {
-      _selectFirstMatch(pick.words);
+    final pickedTopic = topicIdOf(pick.key);
+    if (_loadedKey == pick.key && _targetKey == pick.key) {
+      _selectFirstMatch(pick.words,
+          boilerplate: pickedTopic != null ? const {} : null);
+      return;
+    }
+    if (pickedTopic != null) {
+      _pendingFind = pick;
+      await _openTopic(pickedTopic);
       return;
     }
     final day = DateTime.parse(pick.key);
@@ -1444,10 +1504,11 @@ class _CalendarPageState extends State<CalendarPage>
   }
 
   /// Выделяет первое совпадение в открытой заметке (содержимое не меняется)
-  void _selectFirstMatch(List<String> words) {
-    final hits = findInText(
-        _controller.document.toPlainText(), words, kTemplateLines);
-    if (hits == null) return;
+  /// [boilerplate]: null — строки шаблонов дня; у тем шаблонов нет ({}).
+  void _selectFirstMatch(List<String> words, {Set<String>? boilerplate}) {
+    final hits = findInText(_controller.document.toPlainText(), words,
+        boilerplate ?? kTemplateLines);
+    if (hits == null || hits.lines.isEmpty) return;
     final r = hits.first;
     _editorFocus.requestFocus();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1473,6 +1534,7 @@ class _CalendarPageState extends State<CalendarPage>
   Future<void> _loadNoteInner(DateTime day) async {
     final key = _dayKey(day);
     _loadedKey = null; // пока не загрузили — сохранять нельзя (чтобы не затереть заметку)
+    final seq = ++_loadSeq;
 
     final notes = _notes;
     if (notes == null) return;
@@ -1481,14 +1543,14 @@ class _CalendarPageState extends State<CalendarPage>
     try {
       doc = await notes.doc(key).get();
     } on FirebaseException catch (e) {
-      _setStatus('Не удалось загрузить (${e.code})');
+      if (seq == _loadSeq) _setStatus('Не удалось загрузить (${e.code})');
       return;
     } catch (_) {
-      _setStatus('Не удалось загрузить');
+      if (seq == _loadSeq) _setStatus('Не удалось загрузить');
       return;
     }
-    // пока грузилось, мог быть выбран другой день
-    if (!mounted || key != _dayKey(_selectedDay)) return;
+    // пока грузилось, мог быть выбран другой день или тема
+    if (!mounted || seq != _loadSeq || key != _targetKey) return;
 
     var accent = _pickAccent();
     Document document;
@@ -1519,11 +1581,7 @@ class _CalendarPageState extends State<CalendarPage>
     _lastLen = document.length;
     _accent = accent;
 
-    _controller.document = document;
-    _controller.updateSelection(
-      const TextSelection.collapsed(offset: 0),
-      ChangeSource.local,
-    );
+    _setEditorDocument(document);
     _loadedKey = key;
     _setStatus('');
 
@@ -1533,35 +1591,133 @@ class _CalendarPageState extends State<CalendarPage>
     if (find != null && find.key == key) _selectFirstMatch(find.words);
   }
 
+  /// Подменяет документ редактора и ставит курсор в начало.
+  /// В вебе редактор на любое изменение забирает фокус клавиатуры; если
+  /// поверх открыто окно (поиск, название темы…), фокус не забираем —
+  /// иначе ввод из окна уйдёт в заметку.
+  void _setEditorDocument(Document document) {
+    final quiet = !(ModalRoute.of(context)?.isCurrent ?? true);
+    _controller.skipRequestKeyboard = quiet;
+    _controller.document = document;
+    _controller.skipRequestKeyboard = quiet;
+    _controller.updateSelection(
+      const TextSelection.collapsed(offset: 0),
+      ChangeSource.local,
+    );
+    _controller.skipRequestKeyboard = false;
+  }
+
+  /// Загружает то, что сейчас открыто: тему или день
+  void _loadTarget() {
+    final id = _openTopicId;
+    if (id != null) {
+      _loadTopic(id);
+    } else {
+      _loadNote(_selectedDay);
+    }
+  }
+
+  Future<void> _loadTopic(String id) async {
+    _loadingNow = true;
+    try {
+      await _loadTopicInner(id);
+    } finally {
+      _loadingNow = false;
+    }
+  }
+
+  /// Загрузка темы в редактор. Без шаблонов дня: новая тема пустая.
+  Future<void> _loadTopicInner(String id) async {
+    final key = topicKey(id);
+    _loadedKey = null; // пока не загрузили — сохранять нельзя
+    final seq = ++_loadSeq;
+    if (_notes == null) return;
+
+    TopicContent? content;
+    try {
+      content = await _topics.store.load(id);
+    } on FirebaseException catch (e) {
+      if (seq == _loadSeq) _setStatus('Не удалось загрузить (${e.code})');
+      return;
+    } catch (_) {
+      if (seq == _loadSeq) _setStatus('Не удалось загрузить');
+      return;
+    }
+    // пока грузилось, могли открыть другую тему или день
+    if (!mounted || seq != _loadSeq || key != _targetKey) return;
+
+    if (content == null) {
+      // темы больше нет (удалена на другом устройстве) — вернуться к дню
+      setState(() => _openTopicId = null);
+      _topics.load();
+      _loadNote(_selectedDay);
+      return;
+    }
+
+    Document document;
+    if (content.delta.isNotEmpty) {
+      try {
+        document = Document.fromJson(jsonDecode(content.delta));
+      } catch (_) {
+        document = Document()..insert(0, content.text);
+      }
+    } else {
+      document = Document()..insert(0, content.text);
+    }
+
+    final json = jsonEncode(document.toDelta().toJson());
+    _lastSavedJson = json;
+    _lastSeenJson = json;
+    _lastLen = document.length;
+
+    _setEditorDocument(document);
+    _loadedKey = key;
+    _setStatus('');
+
+    final find = _pendingFind;
+    _pendingFind = null;
+    if (find != null && find.key == key) {
+      _selectFirstMatch(find.words, boilerplate: const {});
+    }
+  }
+
   void _autoSave() {
     if (_backupBusy) return; // во время копии/восстановления — ничего не пишем
-    final key = _dayKey(_selectedDay);
+    final key = _targetKey;
     if (_loadedKey != key) {
       // заметка так и не загрузилась (например, нет доступа) — пробуем снова
-      if (!_loadingNow) _loadNote(_selectedDay);
+      if (!_loadingNow) _loadTarget();
       return;
     }
     if (_isDirty) _saveNote();
   }
 
   Future<void> _saveNote() async {
-    final key = _dayKey(_selectedDay);
+    // сохраняем только то, что загружено в редактор, и только туда же
+    final key = _targetKey;
     if (_loadedKey != key || _saving) return;
     final notes = _notes;
     if (notes == null) return;
+    final topicId = topicIdOf(key);
     _saving = true;
     final json = _currentJson();
     final plain = _controller.document.toPlainText().replaceAll('\uFFFC', '');
     _setStatus('Сохранение...');
     try {
-      await notes.doc(key).set({
-        'delta': json,
-        'text': plain,
-        'accent': _accent,
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
-      if (key == _dayKey(_selectedDay)) _lastSavedJson = json;
-      _searchCache.put(key, plain);
+      if (topicId != null) {
+        await _topics.store.saveContent(topicId, json, plain);
+        _topics.touch(topicId);
+        _searchCache.putTopicText(topicId, plain);
+      } else {
+        await notes.doc(key).set({
+          'delta': json,
+          'text': plain,
+          'accent': _accent,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+        _searchCache.put(key, plain);
+      }
+      if (key == _targetKey) _lastSavedJson = json;
       _setStatus('Сохранено ✓');
     } on FirebaseException catch (e) {
       _setStatus('Ошибка сохранения (${e.code})');
@@ -1578,17 +1734,172 @@ class _CalendarPageState extends State<CalendarPage>
     while (_saving) {
       await Future.delayed(const Duration(milliseconds: 100));
     }
-    if (_loadedKey == _dayKey(_selectedDay) && _isDirty) {
+    if (_loadedKey == _targetKey && _isDirty) {
       await _saveNote();
     }
     if (!mounted) return;
     setState(() {
       _selectedDay = selectedDay;
       _focusedDay = focusedDay;
+      _openTopicId = null; // клик по дню возвращает заметку дня
     });
     _status.value = '';
     _loadNote(selectedDay);
   }
+
+  // ---------- темы ----------
+
+  /// Коллекция тем вошедшего пользователя: users/{uid}/topics
+  CollectionReference<Map<String, dynamic>>? get _topicsRef {
+    final user = FirebaseAuth.instance.currentUser;
+    if (_signingOut || user == null || user.uid != widget.uid) return null;
+    return _db.collection('users').doc(user.uid).collection('topics');
+  }
+
+  /// Открыть тему в центре (так же, как переход на другой день:
+  /// дождаться сохранения и сохранить текущие правки)
+  Future<void> _openTopic(String id) async {
+    if (_backupBusy) return;
+    while (_saving) {
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    if (_loadedKey == _targetKey && _isDirty) {
+      await _saveNote();
+    }
+    if (!mounted) return;
+    setState(() => _openTopicId = id);
+    _status.value = '';
+    _loadTopic(id);
+  }
+
+  Future<void> _createTopic() async {
+    if (_backupBusy || _notes == null) return;
+    Topic topic;
+    try {
+      topic = await _topics.create();
+    } catch (e) {
+      _topicError('Не удалось создать тему', e);
+      return;
+    }
+    await _openTopic(topic.id);
+    if (!mounted) return;
+    await _renameTopic(topic.id, heading: 'Новая тема');
+  }
+
+  Future<void> _renameTopic(String id, {String heading = 'Переименовать тему'}) async {
+    final t = _topics.byId(id);
+    if (t == null) return;
+    final title =
+        await showTopicTitleDialog(context, initial: t.title, heading: heading);
+    if (title == null || !mounted) return;
+    try {
+      await _topics.rename(id, title);
+    } catch (e) {
+      _topicError('Не удалось переименовать тему', e);
+    }
+  }
+
+  Future<void> _deleteTopic(String id) async {
+    final t = _topics.byId(id);
+    if (t == null || _backupBusy) return;
+    if (!await confirmTopicDelete(context, t.title) || !mounted) return;
+    if (_openTopicId == id) {
+      // несохранённые правки удаляемой темы не нужны: сразу возвращаемся
+      // к дню (с этого момента тема не сохраняется — ключ цели другой)
+      setState(() => _openTopicId = null);
+      _status.value = '';
+      _loadNote(_selectedDay);
+    }
+    // уже идущее сохранение пусть завершится до удаления
+    while (_saving) {
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    if (!mounted) return;
+    try {
+      await _topics.delete(id);
+      _searchCache.removeTopic(id);
+    } catch (e) {
+      _topicError('Не удалось удалить тему', e);
+    }
+  }
+
+  void _topicError(String what, Object e) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('$what: ${describeError(e)}')),
+    );
+  }
+
+  /// Название открытой темы в шапке; щелчок — переименовать
+  Widget _topicHeader(String id) => ListenableBuilder(
+        listenable: _topics,
+        builder: (context, _) => _topicHeaderBody(id),
+      );
+
+  Widget _topicHeaderBody(String id) {
+    final title = _topics.byId(id)?.title ?? '';
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Tooltip(
+        message: 'Переименовать',
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () => _renameTopic(id),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.topic_outlined, size: 18, color: kAccent),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    title,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: kAccentLight,
+                      fontSize: 17,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Левая колонка: календарь, под ним темы на всю оставшуюся высоту
+  /// (не меньше 260). Если места мало — колонка прокручивается целиком.
+  Widget _leftColumn() => CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(child: _calendarPanel()),
+          const SliverToBoxAdapter(child: SizedBox(height: 16)),
+          SliverLayoutBuilder(
+            builder: (context, c) => SliverToBoxAdapter(
+              child: SizedBox(
+                height: max(
+                    260.0, c.viewportMainAxisExtent - c.precedingScrollExtent),
+                child: _topicsPanel(),
+              ),
+            ),
+          ),
+        ],
+      );
+
+  Widget _topicsPanel() => TopicsPanel(
+        controller: _topics,
+        selectedId: _openTopicId,
+        enabled: !_backupBusy,
+        onOpen: (id) {
+          if (id != _openTopicId) _openTopic(id);
+        },
+        onCreate: _createTopic,
+        onRename: _renameTopic,
+        onDelete: _deleteTopic,
+      );
 
   // ---------- реакция на изменения в редакторе ----------
 
@@ -2450,7 +2761,9 @@ class _CalendarPageState extends State<CalendarPage>
               ),
               const SizedBox(width: 6),
               Expanded(
-                child: Text(
+                child: _openTopicId != null
+                    ? _topicHeader(_openTopicId!)
+                    : Text(
                   _formatDate(_selectedDay),
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -2514,7 +2827,9 @@ class _CalendarPageState extends State<CalendarPage>
                 focusNode: _editorFocus,
                 scrollController: _editorScroll,
                 config: QuillEditorConfig(
-                  placeholder: 'Что важного в этот день...',
+                  placeholder: _openTopicId != null
+                      ? 'Заметки по теме...'
+                      : 'Что важного в этот день...',
                   padding: EdgeInsets.zero,
                   expands: true,
                   embedBuilders: const [DividerEmbedBuilder()],
@@ -2584,12 +2899,7 @@ class _CalendarPageState extends State<CalendarPage>
                             child: _calendarVisible
                                 ? Padding(
                                     padding: const EdgeInsets.only(right: 20),
-                                    child: Align(
-                                      alignment: Alignment.topCenter,
-                                      child: SingleChildScrollView(
-                                        child: _calendarPanel(),
-                                      ),
-                                    ),
+                                    child: _leftColumn(),
                                   )
                                 : null,
                           ),
@@ -2609,6 +2919,8 @@ class _CalendarPageState extends State<CalendarPage>
               children: [
                 if (_calendarVisible) ...[
                   _calendarPanel(),
+                  const SizedBox(height: 16),
+                  SizedBox(height: 300, child: _topicsPanel()),
                   const SizedBox(height: 16),
                 ],
                 SizedBox(height: 560, child: _notePanel()),
