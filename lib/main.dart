@@ -18,6 +18,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'backup.dart';
 import 'firebase_options.dart';
+import 'search.dart' show findInText, kObjectReplacement;
+import 'search_dialog.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -76,6 +78,10 @@ const List<String> kMonthsShort = [
   'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'
 ];
 const List<String> kWeekdaysShort = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+
+// Границы календаря (их же проверяет поиск)
+final DateTime kCalendarFirstDay = DateTime(2020);
+final DateTime kCalendarLastDay = DateTime(2030, 12, 31);
 
 // ============================================================
 //  Праздники РФ (нерабочие будние дни, с учётом переносов)
@@ -422,6 +428,24 @@ Document _buildTemplate(DateTime day, String accent) {
   }
   return Document.fromJson(ops);
 }
+
+/// Строки, которые шаблоны дней вставляют сами (заголовки блоков, готовые
+/// пункты, отчёт, напоминание о празднике, «Вадим викли»). Поиск их
+/// пропускает. Набор берётся из самих шаблонов за год вперёд — тексты
+/// нигде не дублируются.
+final Set<String> kTemplateLines = () {
+  final lines = <String>{};
+  final start = DateTime(2026, 11, 1);
+  for (var i = 0; i < 366; i++) {
+    final day = DateTime(start.year, start.month, start.day + i);
+    final text = _buildTemplate(day, kNotForgetColors.first).toPlainText();
+    for (final line in text.split('\n')) {
+      final visible = line.replaceAll(kObjectReplacement, '').trim();
+      if (visible.isNotEmpty) lines.add(visible);
+    }
+  }
+  return lines;
+}();
 
 // ============================================================
 //  Приложение
@@ -1300,7 +1324,10 @@ class _CalendarPageState extends State<CalendarPage>
       if (mounted) {
         setState(() => _backupBusy = false);
         // показываем то, что теперь лежит в базе
-        if (touched) _loadNote(_selectedDay);
+        if (touched) {
+          _searchCache.invalidate();
+          _loadNote(_selectedDay);
+        }
       }
     }
   }
@@ -1375,6 +1402,63 @@ class _CalendarPageState extends State<CalendarPage>
     return _db.collection('users').doc(user.uid).collection('notes');
   }
 
+  // ---------- поиск по заметкам ----------
+
+  late final NoteSearchCache _searchCache = NoteSearchCache(() async {
+    final notes = _notes;
+    if (notes == null) throw StateError('signed out');
+    // только с сервера: без связи — ошибка, а не пустой кэш
+    final snap = await notes
+        .get(const GetOptions(source: Source.server))
+        .timeout(const Duration(seconds: 30));
+    return {for (final d in snap.docs) d.id: d.data()};
+  });
+
+  /// Слова, которые нужно выделить, когда загрузится этот день
+  SearchPick? _pendingFind;
+
+  Future<void> _openSearch() async {
+    if (_notes == null) return; // без входа поиск не открываем
+    final pick = await showNoteSearch(
+      context,
+      cache: _searchCache,
+      boilerplate: kTemplateLines,
+      // открытый день ищем по тексту редактора — с несохранёнными правками
+      liveKey: () =>
+          _loadedKey == _dayKey(_selectedDay) ? _loadedKey : null,
+      liveText: () => _controller.document.toPlainText(),
+      inCalendarRange: (key) {
+        final d = DateTime.parse(key);
+        return !d.isBefore(kCalendarFirstDay) && !d.isAfter(kCalendarLastDay);
+      },
+    );
+    if (pick == null || !mounted) return;
+    if (_loadedKey == pick.key && _dayKey(_selectedDay) == pick.key) {
+      _selectFirstMatch(pick.words);
+      return;
+    }
+    final day = DateTime.parse(pick.key);
+    _pendingFind = pick;
+    // как клик по дню в календаре: сохранить текущий день и открыть нужный
+    await _onDaySelected(day, day);
+  }
+
+  /// Выделяет первое совпадение в открытой заметке (содержимое не меняется)
+  void _selectFirstMatch(List<String> words) {
+    final hits = findInText(
+        _controller.document.toPlainText(), words, kTemplateLines);
+    if (hits == null) return;
+    final r = hits.first;
+    _editorFocus.requestFocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _controller.updateSelection(
+        TextSelection(baseOffset: r.start, extentOffset: r.end),
+        ChangeSource.local,
+      );
+    });
+  }
+
   bool _loadingNow = false;
 
   Future<void> _loadNote(DateTime day) async {
@@ -1442,6 +1526,11 @@ class _CalendarPageState extends State<CalendarPage>
     );
     _loadedKey = key;
     _setStatus('');
+
+    // переход из поиска — выделить найденное
+    final find = _pendingFind;
+    _pendingFind = null;
+    if (find != null && find.key == key) _selectFirstMatch(find.words);
   }
 
   void _autoSave() {
@@ -1472,6 +1561,7 @@ class _CalendarPageState extends State<CalendarPage>
         'updatedAt': FieldValue.serverTimestamp(),
       });
       if (key == _dayKey(_selectedDay)) _lastSavedJson = json;
+      _searchCache.put(key, plain);
       _setStatus('Сохранено ✓');
     } on FirebaseException catch (e) {
       _setStatus('Ошибка сохранения (${e.code})');
@@ -2184,8 +2274,8 @@ class _CalendarPageState extends State<CalendarPage>
 
   Widget _monthView() {
     return TableCalendar(
-      firstDay: DateTime(2020),
-      lastDay: DateTime(2030, 12, 31),
+      firstDay: kCalendarFirstDay,
+      lastDay: kCalendarLastDay,
       focusedDay: _focusedDay,
       startingDayOfWeek: StartingDayOfWeek.monday,
       rowHeight: 40,
@@ -2351,6 +2441,12 @@ class _CalendarPageState extends State<CalendarPage>
                     _calendarVisible ? 'Скрыть календарь' : 'Показать календарь',
                 onPressed: () =>
                     setState(() => _calendarVisible = !_calendarVisible),
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.search, color: kAccent),
+                tooltip: 'Поиск по заметкам',
+                onPressed: _openSearch,
               ),
               const SizedBox(width: 6),
               Expanded(
