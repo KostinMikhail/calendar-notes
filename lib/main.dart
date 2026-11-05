@@ -41,14 +41,14 @@ Future<void> _initFirebase() async {
 // ============================================================
 //  Палитра
 // ============================================================
-const Color kBackground = Color(0xFF161616);
-const Color kSurface = Color(0xFF1F1F1F);
-const Color kCard = Color(0xFF292929);
-const Color kAccent = Color(0xFFE8C84A);
-const Color kAccentLight = Color(0xFFF5DC6E);
-const Color kTextPrimary = Color(0xFFF0F0F0);
-const Color kTextSecondary = Color(0xFF888888);
-const Color kDivider = Color(0xFF333333);
+const Color kBackground = Color(0xFF0E0D13);
+const Color kSurface = Color(0xFF15141C);
+const Color kCard = Color(0xFF1C1A25);
+const Color kAccent = Color(0xFF9C8FCB);
+const Color kAccentLight = Color(0xFFC9BCE6);
+const Color kTextPrimary = Color(0xFFECEAF2);
+const Color kTextSecondary = Color(0xFF8D8A9C);
+const Color kDivider = Color(0xFF292734);
 
 // Цвета текста (кнопки в панели форматирования)
 const String kRed = '#FF5C5C';
@@ -195,7 +195,7 @@ class DividerEmbedBuilder extends EmbedBuilder {
         height: 2,
         margin: const EdgeInsets.symmetric(vertical: 10),
         decoration: BoxDecoration(
-          color: const Color(0xFF4A4A4A),
+          color: const Color(0xFF34313F),
           borderRadius: BorderRadius.circular(1),
         ),
       ),
@@ -2155,13 +2155,30 @@ class _CalendarPageState extends State<CalendarPage>
 
   Widget _calendarPanel() {
     return Container(
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: kSurface,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: kDivider),
       ),
-      padding: const EdgeInsets.all(8),
-      child: _showMonths ? _monthPicker() : _monthView(),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // баннер с дизерингом (318x112): одна точка = один логический пиксель
+          Image.asset(
+            'assets/images/banner.png',
+            width: double.infinity,
+            height: 112,
+            fit: BoxFit.cover,
+            filterQuality: FilterQuality.none,
+            errorBuilder: (_, __, ___) => const SizedBox(height: 0),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: _showMonths ? _monthPicker() : _monthView(),
+          ),
+        ],
+      ),
     );
   }
 
@@ -2197,7 +2214,7 @@ class _CalendarPageState extends State<CalendarPage>
         cellMargin: EdgeInsets.all(4),
         defaultTextStyle: TextStyle(color: kTextPrimary),
         weekendTextStyle: TextStyle(color: kTextSecondary),
-        outsideTextStyle: TextStyle(color: Color(0xFF555555)),
+        outsideTextStyle: TextStyle(color: Color(0xFF55526A)),
         todayTextStyle:
             TextStyle(color: kAccentLight, fontWeight: FontWeight.bold),
         selectedTextStyle:
@@ -2369,7 +2386,34 @@ class _CalendarPageState extends State<CalendarPage>
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(color: kDivider),
               ),
-              child: QuillEditor(
+              child: Stack(
+                children: [
+                  // заставка видна, пока в заметке ничего нет (например, выходной)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: ListenableBuilder(
+                        listenable: _controller,
+                        builder: (context, _) {
+                          final empty = _controller.document.isEmpty();
+                          return AnimatedOpacity(
+                            duration: const Duration(milliseconds: 250),
+                            opacity: empty ? 1 : 0,
+                            child: Center(
+                              child: Image.asset(
+                                'assets/images/empty_day.png',
+                                width: 176,
+                                height: 176,
+                                filterQuality: FilterQuality.none,
+                                errorBuilder: (_, __, ___) =>
+                                    const SizedBox.shrink(),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                  QuillEditor(
                 controller: _controller,
                 focusNode: _editorFocus,
                 scrollController: _editorScroll,
@@ -2388,6 +2432,8 @@ class _CalendarPageState extends State<CalendarPage>
                     ),
                   ),
                 ),
+              ),
+                ],
               ),
             ),
           ),
