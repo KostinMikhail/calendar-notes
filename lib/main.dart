@@ -22,6 +22,7 @@ import 'search.dart' show findInText, kObjectReplacement;
 import 'search_dialog.dart';
 import 'editor_utils.dart';
 import 'templates.dart';
+import 'today.dart';
 import 'topics.dart';
 import 'topics_panel.dart';
 
@@ -1679,6 +1680,40 @@ class _CalendarPageState extends State<CalendarPage>
     _loadNote(selectedDay);
   }
 
+  /// Уже открыт сегодняшний день и виден текущий месяц
+  bool get _onToday => isOnToday(
+        selected: _selectedDay,
+        focused: _focusedDay,
+        now: DateTime.now(),
+        topicOpen: _openTopicId != null,
+        monthPickerOpen: _showMonths,
+      );
+
+  /// Кнопка «Сегодня»: как клик по сегодняшнему дню в календаре
+  /// (сохранение текущей заметки — внутри _onDaySelected), плюс сетка
+  /// переходит на текущий месяц. «Сегодня» — по часам в момент нажатия.
+  Future<void> _goToToday() async {
+    if (_backupBusy || _goingToday || _onToday) return;
+    final today = localDate(DateTime.now());
+    if (_openTopicId == null && isSameDay(_selectedDay, today)) {
+      // сегодняшняя заметка уже открыта — только вернуть сетку, без перезагрузки
+      setState(() {
+        _focusedDay = today;
+        _showMonths = false;
+      });
+      return;
+    }
+    _goingToday = true; // повторное нажатие, пока ждём сохранение, — без эффекта
+    try {
+      setState(() => _showMonths = false);
+      await _onDaySelected(today, today);
+    } finally {
+      _goingToday = false;
+    }
+  }
+
+  bool _goingToday = false;
+
   // ---------- темы ----------
 
   // ---------- шаблоны дня ----------
@@ -1968,6 +2003,10 @@ class _CalendarPageState extends State<CalendarPage>
             padding: const EdgeInsets.all(8),
             child: _showMonths ? _monthPicker() : _monthView(),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            child: TodayButton(subdued: _onToday, onPressed: _goToToday),
+          ),
         ],
       ),
     );
@@ -1983,7 +2022,7 @@ class _CalendarPageState extends State<CalendarPage>
       daysOfWeekHeight: 24,
       selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
       onDaySelected: _onDaySelected,
-      onPageChanged: (d) => _focusedDay = d,
+      onPageChanged: (d) => setState(() => _focusedDay = d),
       // клик по названию месяца — показать все месяцы года
       onHeaderTapped: (_) => setState(() {
         _pickerYear = _focusedDay.year;
@@ -2303,6 +2342,53 @@ class _CalendarPageState extends State<CalendarPage>
               ],
             );
           },
+        ),
+      ),
+    );
+  }
+}
+
+/// Кнопка «Сегодня» под календарём. [subdued] — уже открыт сегодняшний
+/// день: кнопка приглушена, но нажимается (ничего не произойдёт).
+class TodayButton extends StatelessWidget {
+  const TodayButton({super.key, required this.subdued, required this.onPressed});
+
+  final bool subdued;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = subdued ? kTextSecondary : kAccentLight;
+    return Tooltip(
+      message: 'Перейти на сегодня',
+      child: Semantics(
+        button: true,
+        label: 'Перейти на сегодня',
+        excludeSemantics: true,
+        child: SizedBox(
+          width: double.infinity,
+          height: 36,
+          child: TextButton.icon(
+            onPressed: onPressed,
+            icon: Icon(Icons.today_outlined, size: 18, color: color),
+            label: Text(
+              'Сегодня',
+              style: TextStyle(
+                color: color,
+                fontSize: 14,
+                fontWeight: subdued ? FontWeight.w500 : FontWeight.w600,
+              ),
+            ),
+            style: TextButton.styleFrom(
+              backgroundColor: subdued ? Colors.transparent : kCard,
+              foregroundColor: color,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: const BorderSide(color: kDivider),
+              ),
+            ),
+          ),
         ),
       ),
     );
