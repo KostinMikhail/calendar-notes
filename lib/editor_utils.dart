@@ -1,6 +1,12 @@
 // Мелкие функции редактора без Flutter-виджетов: проверяются тестами.
 
 import 'package:flutter/services.dart';
+import 'package:flutter_quill/flutter_quill.dart' show Document;
+
+/// Строка документа вокруг [offset] для выделения тройным щелчком
+/// (см. [lineRangeInText])
+TextRange? lineRangeAt(Document doc, int offset) =>
+    lineRangeInText(doc.toPlainText(), offset);
 
 /// Ctrl+Shift+«минус» — вставить разделитель. С Shift минус в разных
 /// раскладках приходит как minus или underscore; на цифровом блоке —
@@ -94,4 +100,67 @@ DividerInsert dividerInsertOps(List<dynamic> docOps, int offset) {
     _dividerOp,
     {'insert': '\n'},
   ], o + 3);
+}
+
+// ============================================================
+//  Тройной щелчок — выделить строку
+// ============================================================
+
+/// Строка (абзац до перевода строки) вокруг позиции [offset] в простом
+/// тексте документа — без завершающего перевода строки. null — выделять
+/// нечего: пустая строка или строка-разделитель.
+TextRange? lineRangeInText(String plain, int offset) {
+  if (plain.isEmpty) return null;
+  final o = offset.clamp(0, plain.length - 1);
+  final start = o == 0 ? 0 : plain.lastIndexOf('\n', o - 1) + 1;
+  var end = plain.indexOf('\n', o);
+  if (end < 0) end = plain.length;
+  if (end <= start) return null; // пустая строка
+  final text = plain.substring(start, end);
+  // разделитель (и другие вставки) — строка из одного символа-объекта
+  if (text.replaceAll('\uFFFC', '').isEmpty) return null;
+  return TextRange(start: start, end: end);
+}
+
+/// Подсчёт щелчков мышью подряд: следующий засчитывается, если он пришёл
+/// не позже [window] после предыдущего и не дальше [slop] пикселей.
+/// После третьего счёт начинается заново.
+class ClickCounter {
+  ClickCounter({
+    this.window = const Duration(milliseconds: 500),
+    this.slop = 8,
+  });
+
+  final Duration window;
+  final double slop;
+
+  Duration? _lastTime;
+  Offset? _lastPos;
+  int _count = 0;
+
+  /// Номер щелчка в серии (1, 2, 3)
+  int get count => _count;
+
+  int register(Offset position, Duration time) {
+    final last = _lastTime;
+    final lastPos = _lastPos;
+    if (last != null &&
+        lastPos != null &&
+        _count < 3 &&
+        time - last <= window &&
+        (position - lastPos).distance <= slop) {
+      _count++;
+    } else {
+      _count = 1;
+    }
+    _lastTime = time;
+    _lastPos = position;
+    return _count;
+  }
+
+  void reset() {
+    _count = 0;
+    _lastTime = null;
+    _lastPos = null;
+  }
 }

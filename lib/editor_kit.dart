@@ -161,6 +161,9 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
         embedBuilders: const [DividerEmbedBuilder()],
         // клик по ссылке — меню «Открыть / Изменить / Убрать ссылку»
         customRecognizerBuilder: _linkRecognizer,
+        // тройной щелчок мышью — выделить строку целиком
+        onTapDown: _onEditorTapDown,
+        onTapUp: _onEditorTapUp,
         customStyles: DefaultStyles(
           link: const TextStyle(
             color: Color(0xFF5AB0FF),
@@ -358,7 +361,81 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
       return null;
     }
     return TapGestureRecognizer()
-      ..onTapUp = (details) => _showLinkMenu(leaf, details.globalPosition);
+      ..onTapUp = (details) => _onLinkTapUp(leaf, details);
+  }
+
+  // ---------- тройной щелчок — выделить строку ----------
+
+  final ClickCounter _clicks = ClickCounter();
+  final Stopwatch _clickClock = Stopwatch()..start();
+  bool _swallowTapUp = false; // отпускание третьего щелчка уже обработано
+  Timer? _linkMenuTimer;
+
+  @override
+  void dispose() {
+    _linkMenuTimer?.cancel();
+    super.dispose();
+  }
+
+  bool get _shiftPressed {
+    final keys = HardwareKeyboard.instance.logicalKeysPressed;
+    return keys.contains(LogicalKeyboardKey.shiftLeft) ||
+        keys.contains(LogicalKeyboardKey.shiftRight);
+  }
+
+  /// Выделяет строку вокруг [offset] (без перевода строки).
+  /// false — выделять нечего (пустая строка, разделитель).
+  bool _selectLineAt(int offset) {
+    final range = lineRangeAt(_ec.document, offset);
+    if (range == null) return false;
+    _ec.updateSelection(
+      TextSelection(baseOffset: range.start, extentOffset: range.end),
+      ChangeSource.local,
+    );
+    return true;
+  }
+
+  /// Нажатие в редакторе: третье подряд (мышью) выделяет строку.
+  /// Первое и второе (слово) — как раньше; Shift и касания не считаем.
+  bool _onEditorTapDown(
+      TapDownDetails details, TextPosition Function(Offset) positionAt) {
+    _swallowTapUp = false;
+    if (details.kind != PointerDeviceKind.mouse || _shiftPressed) {
+      _clicks.reset();
+      return false;
+    }
+    final n = _clicks.register(details.globalPosition, _clickClock.elapsed);
+    if (n < 3) return false;
+    if (!_selectLineAt(positionAt(details.globalPosition).offset)) {
+      return false; // пустая строка / разделитель — обычный щелчок
+    }
+    _swallowTapUp = true;
+    return true;
+  }
+
+  /// Отпускание третьего щелчка не должно сбросить выделение
+  bool _onEditorTapUp(TapUpDetails details, TextPosition Function(Offset) _) {
+    if (!_swallowTapUp) return false;
+    _swallowTapUp = false;
+    return true;
+  }
+
+  /// Щелчок по ссылке видят и ссылка, и редактор. Считает щелчки только
+  /// редактор (_onEditorTapDown): он же выделяет строку на третьем.
+  /// Ссылка лишь откладывает меню, пока не ясно, что щелчок одиночный.
+  void _onLinkTapUp(Leaf leaf, TapUpDetails details) {
+    _linkMenuTimer?.cancel();
+    if (details.kind != PointerDeviceKind.mouse) {
+      _showLinkMenu(leaf, details.globalPosition); // касание — сразу, как раньше
+      return;
+    }
+    if (_clicks.count > 1) return; // второй/третий щелчок серии
+    // ждём, не будет ли второго щелчка
+    _linkMenuTimer = Timer(kDoubleTapTimeout, () {
+      if (mounted && _clicks.count <= 1) {
+        _showLinkMenu(leaf, details.globalPosition);
+      }
+    });
   }
 
   Future<void> _showLinkMenu(Leaf leaf, Offset globalPos) async {
