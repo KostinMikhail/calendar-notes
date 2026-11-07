@@ -20,6 +20,7 @@ import 'backup.dart';
 import 'firebase_options.dart';
 import 'search.dart' show findInText, kObjectReplacement;
 import 'search_dialog.dart';
+import 'tasks.dart';
 import 'editor_utils.dart';
 import 'templates.dart';
 import 'today.dart';
@@ -157,6 +158,10 @@ Set<String> _holidaysOf(int year) {
 
 bool _isHoliday(DateTime d) => _holidaysOf(d.year).contains(_md(d));
 bool _isWorkday(DateTime d) => d.weekday <= 5 && !_isHoliday(d);
+
+/// Рабочий день по правилам приложения (для тестов переноса задач)
+@visibleForTesting
+bool isWorkingDay(DateTime d) => _isWorkday(d);
 
 /// Первый рабочий день месяца
 bool _isFirstWorkdayOfMonth(DateTime d) {
@@ -334,7 +339,10 @@ String _pickAccent() =>
     settings: settings,
     accent: accent,
   );
-  return (c.ops.isEmpty ? Document() : Document.fromJson(c.ops), c.accent);
+  if (c.ops.isEmpty) return (Document(), c.accent);
+  // пункты блока «Задачи на день» — открытые задачи с кнопками ✗/✓
+  final ops = linesToOps(markTaskSection(opsToLines(c.ops)));
+  return (Document.fromJson(ops), c.accent);
 }
 
 /// Стандартный шаблон дня (без пользовательских настроек)
@@ -873,6 +881,8 @@ class _CalendarPageState extends State<CalendarPage>
 
   @override
   void dispose() {
+    _hideTaskPopup();
+    _noteSub?.cancel();
     HardwareKeyboard.instance.removeHandler(_onGlobalKey);
     WidgetsBinding.instance.removeObserver(this);
     _autoTimer?.cancel();
@@ -972,10 +982,10 @@ class _CalendarPageState extends State<CalendarPage>
   /// Дожидается текущего сохранения и сохраняет несохранённые правки.
   /// false — правки сохранить не удалось.
   Future<bool> _flushPendingSave() async {
-    for (var i = 0; _saving && i < 300; i++) {
+    for (var i = 0; (_saving || _taskBusy) && i < 300; i++) {
       await Future.delayed(const Duration(milliseconds: 100));
     }
-    if (_saving) return false;
+    if (_saving || _taskBusy) return false;
     if (_loadedKey == _targetKey && _isDirty) {
       await _saveNote();
     }
@@ -1311,8 +1321,8 @@ class _CalendarPageState extends State<CalendarPage>
   Future<void> _signOut() async {
     if (_signingOut) return;
 
-    // сначала сохраняем последние правки
-    while (_saving) {
+    // сначала сохраняем последние правки (и дожидаемся переноса задачи)
+    while (_saving || _taskBusy) {
       await Future.delayed(const Duration(milliseconds: 100));
     }
     if (_loadedKey == _targetKey && _isDirty) {
@@ -1343,10 +1353,12 @@ class _CalendarPageState extends State<CalendarPage>
     // убираем данные пользователя из памяти, дальше никаких операций с заметками
     _signingOut = true;
     _autoTimer?.cancel();
+    _unwatchNote();
     _loadedKey = null;
     _lastSavedJson = '';
     _lastSeenJson = '';
     _lastLen = 0;
+    _docIsDay = false;
     _controller.document = Document();
     _status.value = '';
 
@@ -1514,9 +1526,11 @@ class _CalendarPageState extends State<CalendarPage>
     _lastLen = document.length;
     _accent = accent;
 
+    _docIsDay = true;
     _setEditorDocument(document);
     _loadedKey = key;
     _setStatus('');
+    _watchNote(key);
 
     // переход из поиска — выделить найденное
     final find = _pendingFind;
@@ -1562,6 +1576,7 @@ class _CalendarPageState extends State<CalendarPage>
   /// Загрузка темы в редактор. Без шаблонов дня: новая тема пустая.
   Future<void> _loadTopicInner(String id) async {
     final key = topicKey(id);
+    _unwatchNote();
     _loadedKey = null; // пока не загрузили — сохранять нельзя
     final seq = ++_loadSeq;
     if (_notes == null) return;
@@ -1603,6 +1618,7 @@ class _CalendarPageState extends State<CalendarPage>
     _lastSeenJson = json;
     _lastLen = document.length;
 
+    _docIsDay = false;
     _setEditorDocument(document);
     _loadedKey = key;
     _setStatus('');
@@ -1642,6 +1658,7 @@ class _CalendarPageState extends State<CalendarPage>
         _topics.touch(topicId);
         _searchCache.putTopicText(topicId, plain);
       } else {
+        _savingJson = json; // своё же изменение вернётся из базы — не чужое
         await notes.doc(key).set({
           'delta': json,
           'text': plain,
@@ -1658,13 +1675,15 @@ class _CalendarPageState extends State<CalendarPage>
       _setStatus('Ошибка сохранения');
     } finally {
       _saving = false;
+      _savingJson = null;
     }
   }
 
   Future<void> _onDaySelected(DateTime selectedDay, DateTime focusedDay) async {
     if (_backupBusy) return; // идёт копия/восстановление
-    // не теряем несохранённые правки предыдущего дня
-    while (_saving) {
+    // не теряем несохранённые правки предыдущего дня; перенос задачи
+    // должен отметить задачу в этой же заметке — ждём и его
+    while (_saving || _taskBusy) {
       await Future.delayed(const Duration(milliseconds: 100));
     }
     if (_loadedKey == _targetKey && _isDirty) {
@@ -1713,6 +1732,313 @@ class _CalendarPageState extends State<CalendarPage>
   }
 
   bool _goingToday = false;
+
+  // ---------- этот же день изменили в другой вкладке ----------
+  // Например, в соседней вкладке перенесли задачу на открытый здесь день.
+  // Изменение из базы вливается в редактор поверх своих несохранённых
+  // правок (как при совместном редактировании), без перезагрузки.
+
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _noteSub;
+  String? _noteSubKey;
+
+  /// Что сейчас записывается (его возврат из базы — не чужое изменение)
+  String? _savingJson;
+
+  void _watchNote(String key) {
+    if (_noteSubKey == key && _noteSub != null) return;
+    _unwatchNote();
+    final notes = _notes;
+    if (notes == null) return;
+    _noteSubKey = key;
+    _noteSub = notes.doc(key).snapshots().listen(
+          (snap) => _onRemoteNote(key, snap),
+          onError: (_) {}, // нет связи — просто не следим
+        );
+  }
+
+  void _unwatchNote() {
+    _noteSub?.cancel();
+    _noteSub = null;
+    _noteSubKey = null;
+  }
+
+  void _onRemoteNote(
+      String key, DocumentSnapshot<Map<String, dynamic>> snap) {
+    if (!mounted || _signingOut || snap.metadata.hasPendingWrites) return;
+    if (_loadedKey != key || _targetKey != key || !_docIsDay) return;
+    final data = snap.data();
+    final remoteJson = data?['delta'];
+    if (data == null || remoteJson is! String || remoteJson.isEmpty) return;
+    if (remoteJson == _lastSavedJson || remoteJson == _savingJson) return;
+    if (remoteJson == _currentJson()) {
+      _lastSavedJson = remoteJson;
+      return;
+    }
+    try {
+      final change = rebaseRemoteChange(
+        base: Delta.fromJson(jsonDecode(_lastSavedJson) as List),
+        local: _controller.document.toDelta(),
+        remote: Delta.fromJson(jsonDecode(remoteJson) as List),
+      );
+      if (change.isNotEmpty) {
+        // чужое изменение не должно забирать фокус (например, из поиска)
+        _controller.skipRequestKeyboard = true;
+        _controller.compose(change, _controller.selection, ChangeSource.remote);
+        _controller.skipRequestKeyboard = false;
+        // Ctrl+Z не должен отменять чужое изменение
+        _controller.document.history.clear();
+      }
+    } catch (_) {
+      if (_isDirty) {
+        _setStatus('Заметка изменена в другой вкладке — откройте день заново');
+        return;
+      }
+      // своих правок нет — просто показываем то, что в базе
+      try {
+        final doc = Document.fromJson(jsonDecode(remoteJson) as List);
+        final sel = _controller.selection;
+        _controller.document = doc;
+        _controller.updateSelection(
+          TextSelection.collapsed(
+              offset: sel.baseOffset.clamp(0, doc.length - 1)),
+          ChangeSource.local,
+        );
+      } catch (_) {
+        return;
+      }
+    }
+    // в базе теперь remoteJson; свои несохранённые правки (если были)
+    // остаются «несохранёнными» и уйдут следующим автосохранением
+    _lastSavedJson = remoteJson;
+    _lastSeenJson = _currentJson();
+    _lastLen = _controller.document.length;
+    final accent = data['accent'];
+    if (accent is String && accent.isNotEmpty) _accent = accent;
+    _searchCache.put(key, (data['text'] ?? '').toString());
+    _setStatus('Обновлено из другой вкладки');
+  }
+
+  // ---------- задачи: кнопки ✗ / ✓ (см. tasks.dart) ----------
+
+  /// В редакторе — заметка дня (не тема): только в ней работают задачи
+  bool _docIsDay = false;
+
+  /// Идёт перенос (или отмена переноса) задачи. Смена дня, тема, выход и
+  /// резервная копия ждут его, как ждут сохранения: отметка должна попасть
+  /// в ту же заметку, откуда нажали.
+  bool _taskBusy = false;
+  late final TaskCarrier _taskCarrier =
+      TaskCarrier(FirestoreTaskNoteStore(() => _notes));
+
+  @override
+  TaskMode get _taskMode => _docIsDay ? TaskMode.interactive : TaskMode.off;
+
+  @override
+  DateTime? get _taskNoteDate {
+    final key = _loadedKey;
+    return _docIsDay && key != null ? parseDayKey(key) : null;
+  }
+
+  bool _inDocument(Node node, Document doc) {
+    Node n = node;
+    while (n.parent != null) {
+      n = n.parent!;
+    }
+    return identical(n, doc.root);
+  }
+
+  @override
+  Future<void> _onTaskControl(
+      Line line, TaskControl control, BuildContext anchor) async {
+    if (_taskBusy || _backupBusy || _signingOut || !_docIsDay) return;
+    // где нажали — рядом покажем окошко (запоминаем сразу: после ожидания
+    // строка могла перерисоваться)
+    final anchorBox = anchor.findRenderObject();
+    final at = anchorBox is RenderBox && anchorBox.hasSize
+        ? anchorBox.localToGlobal(Offset.zero) & anchorBox.size
+        : null;
+    final key = _loadedKey;
+    if (key == null || key != _targetKey || _openTopicId != null) return;
+    final noteDate = parseDayKey(key);
+    if (noteDate == null) return;
+    final doc = _controller.document;
+    final lines = docLines(doc);
+    final li = lines.indexWhere((l) => identical(l.node, line));
+    if (li < 0) return;
+    final info = TaskIndex.build(doc, TaskMode.interactive).byLine[line];
+    if (info == null || info.kind != TaskLineKind.task) return;
+    final from = info.value;
+    final step = taskStep(from.state, control);
+    final group = taskGroupAt(opsToLines(doc.toDelta().toJson()), li);
+    if (group == null) return;
+
+    // ✓ / снять ✓ — просто смена состояния (обычное сохранение)
+    if (!step.carry && !step.uncarry) {
+      _setTaskState(doc, line,
+          step.to == TaskState.done ? TaskValue.done : TaskValue.open);
+      return;
+    }
+    if (step.carry && group.isBlank) {
+      _showTaskPopup('Пустую задачу нельзя перенести', at);
+      return;
+    }
+
+    _taskBusy = true;
+    _taskBusyLine.value = line;
+    var message = '';
+    try {
+      // сначала другой день, потом отметка здесь: при ошибке задача
+      // остаётся как была
+      if (step.uncarry) {
+        final targetKey = from.target!;
+        final label = formatTaskDate(parseDayKey(targetKey)!);
+        final out = await _taskCarrier.uncarry(
+            targetKey: targetKey, group: group, label: label);
+        if (out == UncarryOutcome.removed) _searchCache.invalidate();
+        if (out == UncarryOutcome.modified) {
+          message = 'Задача на $label уже изменена и оставлена там';
+        } else if (!step.carry && step.to == TaskState.open) {
+          message = 'Перенос отменён';
+        }
+      }
+      var next = step.to == TaskState.done ? TaskValue.done : TaskValue.open;
+      if (step.carry) {
+        final target = nextWorkingDay(noteDate, _isWorkday);
+        final targetKey = dayKeyOf(target);
+        final label = formatTaskDate(target);
+        final settings = await _templateSettingsForDay();
+        final (built, accent) = _composeDay(target, _pickAccent(), settings);
+        await _taskCarrier.carry(
+          targetKey: targetKey,
+          group: group,
+          emptyNote: TemplateComposition([
+            for (final op in built.toDelta().toJson())
+              Map<String, dynamic>.from(op as Map),
+          ], accent),
+          label: label,
+        );
+        _searchCache.invalidate();
+        next = TaskValue.carried(targetKey);
+        message = carriedLabel(noteDate, target);
+      }
+      // смена дня ждёт переноса, так что заметка та же; строку могли удалить
+      if (!mounted ||
+          _loadedKey != key ||
+          !identical(_controller.document, doc) ||
+          !_inDocument(line, doc)) {
+        _taskNotice('${message.isEmpty ? 'Перенос отменён' : message}'
+            ' — строка задачи изменилась, отметка не поставлена');
+        return;
+      }
+      _setTaskState(doc, line, next);
+      _showTaskPopup(message, at);
+      _autoSave();
+    } on TaskCarryError catch (e) {
+      _taskError(e.message);
+    } on FirebaseException catch (e) {
+      _taskError(step.carry
+          ? 'Не удалось перенести задачу (${e.code})'
+          : 'Не удалось отменить перенос (${e.code})');
+    } catch (_) {
+      _taskError(step.carry
+          ? 'Не удалось перенести задачу'
+          : 'Не удалось отменить перенос');
+    } finally {
+      _taskBusy = false;
+      _taskBusyLine.value = null;
+    }
+  }
+
+  /// Короткое сообщение о переносе (строку статуса сразу перепишет
+  /// автосохранение, поэтому — всплывающее сообщение)
+  void _taskNotice(String message) {
+    if (!mounted || message.isEmpty) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 3)),
+    );
+  }
+
+  OverlayEntry? _taskPopup;
+  Timer? _taskPopupTimer;
+
+  /// Небольшое окошко рядом с кнопками задачи ([at] — где они на экране);
+  /// само исчезает через пару секунд
+  void _showTaskPopup(String text, Rect? at) {
+    if (!mounted || text.isEmpty) return;
+    final overlay = Overlay.maybeOf(context);
+    final box = overlay?.context.findRenderObject();
+    if (at == null || overlay == null || box is! RenderBox) {
+      _taskNotice(text);
+      return;
+    }
+    _hideTaskPopup();
+    final p = box.globalToLocal(at.topLeft);
+    // над кнопками; если места сверху нет — под ними
+    final top = p.dy - 30 < 4 ? p.dy + at.height + 4 : p.dy - 30;
+    final entry = OverlayEntry(
+      builder: (_) => Positioned(
+        left: p.dx,
+        top: top,
+        child: IgnorePointer(
+          child: TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0, end: 1),
+            duration: const Duration(milliseconds: 150),
+            builder: (_, v, child) => Opacity(opacity: v, child: child),
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                decoration: BoxDecoration(
+                  color: kCard,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: kDivider),
+                  boxShadow: const [
+                    BoxShadow(color: Color(0x66000000), blurRadius: 8),
+                  ],
+                ),
+                child: Text(
+                  text,
+                  style: const TextStyle(color: kTextPrimary, fontSize: 12),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    overlay.insert(entry);
+    _taskPopup = entry;
+    _taskPopupTimer =
+        Timer(const Duration(milliseconds: 2200), _hideTaskPopup);
+  }
+
+  void _hideTaskPopup() {
+    _taskPopupTimer?.cancel();
+    _taskPopupTimer = null;
+    final e = _taskPopup;
+    _taskPopup = null;
+    if (e != null && e.mounted) e.remove();
+  }
+
+  /// Ошибка переноса: и в строке статуса, и всплывающим сообщением.
+  /// Задача при этом остаётся как была.
+  void _taskError(String message) {
+    _setStatus(message);
+    _taskNotice(message);
+  }
+
+  /// Состояние задачи — атрибут строки; это обычная правка документа
+  /// (сохранится автосохранением), но не шаг Ctrl+Z: иначе отмена
+  /// разошлась бы с уже перенесённой копией.
+  void _setTaskState(Document doc, Line line, TaskValue value) {
+    for (final l in docLines(doc)) {
+      if (identical(l.node, line)) {
+        _composeQuiet(taskStateDelta(l, value));
+        return;
+      }
+    }
+  }
 
   // ---------- темы ----------
 
@@ -1795,7 +2121,7 @@ class _CalendarPageState extends State<CalendarPage>
   /// дождаться сохранения и сохранить текущие правки)
   Future<void> _openTopic(String id) async {
     if (_backupBusy) return;
-    while (_saving) {
+    while (_saving || _taskBusy) {
       await Future.delayed(const Duration(milliseconds: 100));
     }
     if (_loadedKey == _targetKey && _isDirty) {
@@ -2251,14 +2577,19 @@ class _CalendarPageState extends State<CalendarPage>
                       ),
                     ),
                   ),
-                  QuillEditor(
-                controller: _controller,
-                focusNode: _editorFocus,
-                scrollController: _editorScroll,
-                config: _editorConfig(_openTopicId != null
-                    ? 'Заметки по теме...'
-                    : 'Что важного в этот день...'),
-              ),
+                  // Builder: стили редактора берутся из контекста под Material
+                  Builder(
+                    builder: (editorContext) => QuillEditor(
+                      controller: _controller,
+                      focusNode: _editorFocus,
+                      scrollController: _editorScroll,
+                      config: _editorConfig(
+                          _openTopicId != null
+                              ? 'Заметки по теме...'
+                              : 'Что важного в этот день...',
+                          editorContext),
+                    ),
+                  ),
                 ],
               ),
             ),

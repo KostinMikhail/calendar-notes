@@ -25,6 +25,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_quill/flutter_quill.dart' show Document;
 
 const String kNotForgetTitle = 'Не забыть:';
+
+/// Заголовок блока задач (у его пунктов — кнопки ✗/✓, см. tasks.dart)
+const String kTasksTitle = 'Задачи на день:';
 const String kMonthlyReport = 'Отчёт по команде СДК';
 const String kHolidayNote = 'завтра выходной, не забудь всем рассказать';
 const String kVadimWeekTitle = 'Вадим викли:';
@@ -66,7 +69,7 @@ List<TemplateSection> defaultWeekdaySections(int weekday) {
   switch (weekday) {
     case DateTime.monday:
       return [
-        TemplateSection('Задачи на день:', ['']),
+        TemplateSection(kTasksTitle, ['']),
         TemplateSection('АИ дейли:', [mts, retro, '']),
         TemplateSection('СДК дейли:', ['']),
         TemplateSection('Девопс дейли:', ['']),
@@ -76,7 +79,7 @@ List<TemplateSection> defaultWeekdaySections(int weekday) {
     case DateTime.tuesday:
       return [
         TemplateSection(
-            'Задачи на день:', ['подготовиться к завтрашнему сайт викли', '']),
+            kTasksTitle, ['подготовиться к завтрашнему сайт викли', '']),
         TemplateSection('АИ дейли:', [mts, '']),
         TemplateSection('СДК дейли:', ['']),
         TemplateSection('Девопс дейли:', ['']),
@@ -85,7 +88,7 @@ List<TemplateSection> defaultWeekdaySections(int weekday) {
       ];
     case DateTime.wednesday:
       return [
-        TemplateSection('Задачи на день:', ['']),
+        TemplateSection(kTasksTitle, ['']),
         TemplateSection('АИ дейли:', [mts, '']),
         TemplateSection('СДК дейли:', ['']),
         TemplateSection('Девопс дейли:', ['']),
@@ -96,7 +99,7 @@ List<TemplateSection> defaultWeekdaySections(int weekday) {
       ];
     case DateTime.thursday:
       return [
-        TemplateSection('Задачи на день:', ['']),
+        TemplateSection(kTasksTitle, ['']),
         TemplateSection('АИ дейли:', [mts, '']),
         TemplateSection('СДК дейли:', ['']),
         TemplateSection('Девопс дейли:', ['']),
@@ -106,7 +109,7 @@ List<TemplateSection> defaultWeekdaySections(int weekday) {
       ];
     case DateTime.friday:
       return [
-        TemplateSection('Задачи на день:', ['ОТЧЁТ ПО САЙТУ', '']),
+        TemplateSection(kTasksTitle, ['ОТЧЁТ ПО САЙТУ', '']),
         TemplateSection('АИ дейли:', [mts, '']),
         TemplateSection('СДК дейли:', ['']),
         TemplateSection('Девопс дейли:', ['']),

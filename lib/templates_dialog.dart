@@ -20,6 +20,10 @@ class _TemplatesDialog extends StatefulWidget {
 
 class _TemplatesDialogState extends State<_TemplatesDialog>
     with _EditorKit<_TemplatesDialog> {
+  // задачи в «Задачах на день» видны, но кнопки неактивны
+  @override
+  TaskMode get _taskMode => TaskMode.inert;
+
   static const List<String> _weekdayNames = [
     'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота',
     'Воскресенье'
@@ -356,12 +360,15 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(color: kDivider),
                     ),
-                    child: QuillEditor(
-                      controller: _tc,
-                      focusNode: _tf,
-                      scrollController: _scroll,
-                      config: _editorConfig(
-                          'Пустой шаблон — день начнётся с чистого листа'),
+                    child: Builder(
+                      builder: (editorContext) => QuillEditor(
+                        controller: _tc,
+                        focusNode: _tf,
+                        scrollController: _scroll,
+                        config: _editorConfig(
+                            'Пустой шаблон — день начнётся с чистого листа',
+                            editorContext),
+                      ),
                     ),
                   ),
                 ),

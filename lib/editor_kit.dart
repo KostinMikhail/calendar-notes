@@ -69,6 +69,26 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
       return KeyEventResult.ignored;
     }
 
+    if (!ctrl && !alt && _taskMode == TaskMode.interactive) {
+      // блок «Задачи на день»: Enter / Tab / Backspace по своим правилам
+      final sel = _ec.selection;
+      TaskEdit? edit;
+      if ((logical == LogicalKeyboardKey.enter ||
+              logical == LogicalKeyboardKey.numpadEnter) &&
+          !shift) {
+        edit = planTaskEnter(_ec.document, sel);
+      } else if (logical == LogicalKeyboardKey.tab) {
+        edit = planTaskTab(_ec.document, sel, shift: shift);
+      } else if (logical == LogicalKeyboardKey.backspace && !shift) {
+        edit = planTaskBackspace(_ec.document, sel);
+      }
+      if (edit != null) {
+        _taskConsumedKey = event; // встроенная обработка Quill — пропустить
+        _applyTaskEdit(edit);
+        return KeyEventResult.handled;
+      }
+    }
+
     if (!ctrl && !alt) {
       if (logical == LogicalKeyboardKey.tab) {
         _handleTab(shift);
@@ -153,8 +173,12 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
     _ef.requestFocus();
   }
 
-  /// Общие настройки редактора (заметки, темы, шаблоны)
-  QuillEditorConfig _editorConfig(String placeholder) => QuillEditorConfig(
+  /// Общие настройки редактора (заметки, темы, шаблоны). [editorContext] —
+  /// контекст на месте редактора (под Material): из него берутся стили
+  /// списков, как их берёт сам редактор.
+  QuillEditorConfig _editorConfig(
+          String placeholder, BuildContext editorContext) =>
+      QuillEditorConfig(
         placeholder: placeholder,
         padding: EdgeInsets.zero,
         expands: true,
@@ -164,14 +188,200 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
         // тройной щелчок мышью — выделить строку целиком
         onTapDown: _onEditorTapDown,
         onTapUp: _onEditorTapUp,
+        // задачи: кнопки ✗/✓ вместо номера, цвет/зачёркивание при показе
+        // ignore: experimental_member_use
+        customLeadingBlockBuilder: _taskLeading,
+        textSpanBuilder: _taskSpan,
+        // клавиша уже обработана правилами задач (Flutter всё равно передаёт
+        // её редактору, и Tab дал бы второй отступ)
+        // ignore: experimental_member_use
+        onKeyPressed: (event, node) => identical(event, _taskConsumedKey)
+            ? KeyEventResult.handled
+            : null,
         customStyles: DefaultStyles(
           link: const TextStyle(
             color: Color(0xFF5AB0FF),
             decoration: TextDecoration.underline,
             decorationColor: Color(0xFF5AB0FF),
           ),
+          lists: DefaultStyles.getInstance(editorContext)
+              .lists!
+              .copyWith(indentWidthBuilder: _taskIndentWidth),
         ),
       );
+
+  // ---------- задачи в блоке «Задачи на день» (логика — tasks.dart) ----------
+
+  /// Как показывать задачи в этом редакторе (по умолчанию — никак)
+  TaskMode get _taskMode => TaskMode.off;
+
+  /// Дата открытой заметки (для подсказки «перенести на …»)
+  DateTime? get _taskNoteDate => null;
+
+  /// Нажатие ✗ / ✓ (заметки дня); [anchor] — где нажали (для окошка)
+  void _onTaskControl(Line line, TaskControl control, BuildContext anchor) {}
+
+  /// Строка, у которой сейчас идёт перенос (✗ показывает ожидание)
+  final ValueNotifier<Line?> _taskBusyLine = ValueNotifier<Line?>(null);
+
+  Document? _taskDoc;
+  StreamSubscription<DocChange>? _taskDocSub;
+  TaskIndex? _taskIdx;
+  TaskMode? _taskIdxMode;
+  DateTime? _taskPasteUntil;
+  KeyEvent? _taskConsumedKey;
+
+  /// Следим за изменениями текущего документа (он меняется при загрузке дня)
+  void _watchTaskDoc() {
+    final doc = _ec.document;
+    if (identical(doc, _taskDoc)) return;
+    _taskDocSub?.cancel();
+    _taskDoc = doc;
+    _taskIdx = null;
+    _taskDocSub = doc.changes.listen((change) => _onTaskDocChange(doc, change));
+  }
+
+  TaskIndex _taskIndex() {
+    _watchTaskDoc();
+    final mode = _taskMode;
+    if (_taskIdx == null || _taskIdxMode != mode) {
+      _taskIdx = TaskIndex.build(_ec.document, mode);
+      _taskIdxMode = mode;
+    }
+    return _taskIdx!;
+  }
+
+  void _onTaskDocChange(Document doc, DocChange change) {
+    _taskIdx = null;
+    if (!mounted || !identical(doc, _ec.document)) return;
+    final until = _taskPasteUntil;
+    final fix = sanitizeTasks(doc, change, _taskMode,
+        fromPaste: until != null && DateTime.now().isBefore(until));
+    if (fix != null) _composeQuiet(fix);
+  }
+
+  /// Правка без шага в истории Ctrl+Z
+  void _composeQuiet(Delta delta) {
+    final history = _ec.document.history;
+    final was = history.ignoreChange;
+    history.ignoreChange = true;
+    try {
+      _ec.compose(delta, _ec.selection, ChangeSource.local);
+    } finally {
+      history.ignoreChange = was;
+    }
+  }
+
+  void _applyTaskEdit(TaskEdit edit) {
+    if (edit.delta.isNotEmpty) {
+      _ec.compose(edit.delta, _ec.selection, ChangeSource.local);
+    }
+    final caret = edit.caret;
+    if (caret != null) {
+      _ec.updateSelection(
+        TextSelection.collapsed(
+            offset: caret.clamp(0, _ec.document.length - 1)),
+        ChangeSource.local,
+      );
+    }
+  }
+
+  String _crossTooltip(TaskValue value) {
+    if (value.state == TaskState.carried) {
+      final d = parseDayKey(value.target!);
+      return d == null
+          ? 'Отменить перенос'
+          : 'Перенесено на ${formatTaskDate(d)} — нажмите, чтобы отменить';
+    }
+    final date = _taskNoteDate;
+    if (date == null) return 'Не выполнено — перенести';
+    return 'Не выполнено — перенести на '
+        '${formatTaskDate(nextWorkingDay(date, _isWorkday))}';
+  }
+
+  /// Кнопки ✗/✓ вместо номера у задачи
+  Widget? _taskLeading(Node node, LeadingConfig config) {
+    if (node is! Line) return null;
+    final info = _taskIndex().byLine[node];
+    if (info == null || info.kind != TaskLineKind.task) return null;
+    // номер не рисуется, но счётчики «a.»/«i.» подпунктов должны
+    // начинаться заново под каждой задачей
+    final _ = config.getIndexNumberByIndent;
+    if (_taskMode == TaskMode.inert) {
+      return const TaskControls(value: TaskValue.open, inert: true);
+    }
+    return ValueListenableBuilder<Line?>(
+      valueListenable: _taskBusyLine,
+      builder: (context, busy, _) => TaskControls(
+        value: info.value,
+        busy: identical(busy, node),
+        crossTooltip: _crossTooltip(info.value),
+        onCross: () => _onTaskControl(node, TaskControl.cross, context),
+        onCheck: () => _onTaskControl(node, TaskControl.check, context),
+      ),
+    );
+  }
+
+  /// Выполненная — зелёный текст, перенесённая — зачёркнутый и бледнее
+  /// (вместе с подпунктами). Только при показе: оформление текста в
+  /// документе не меняется.
+  InlineSpan _taskSpan(BuildContext context, Node node, int offset,
+      String text, TextStyle? style, GestureRecognizer? recognizer) {
+    var s = style;
+    final line = node.parent;
+    if (line is Line && _taskMode == TaskMode.interactive) {
+      final info = _taskIndex().byLine[line];
+      if (info != null) {
+        final base = s ?? const TextStyle();
+        switch (info.value.state) {
+          case TaskState.done:
+            s = base.copyWith(
+              color: kTaskDoneTextColor,
+              decorationColor:
+                  base.decoration == null ? null : kTaskDoneTextColor,
+            );
+          case TaskState.carried:
+            final c = (base.color ?? kTextPrimary).withValues(alpha: 0.55);
+            s = base.copyWith(
+              color: c,
+              decoration: TextDecoration.combine([
+                if (base.decoration != null) base.decoration!,
+                TextDecoration.lineThrough,
+              ]),
+              decorationColor: c,
+            );
+          case TaskState.open:
+            break;
+        }
+      }
+    }
+    return defaultSpanBuilder(context, node, offset, text, s, recognizer);
+  }
+
+  /// Место под кнопки: у блока задач колонка шире, подпункты сдвинуты так
+  /// же, чтобы оставаться правее текста задачи
+  HorizontalSpacing _taskIndentWidth(Block block, BuildContext context,
+      int count, LeadingBlockNumberPointWidth numberPointWidth) {
+    final base = TextBlockUtils.defaultIndentWidthBuilder(
+        block, context, count, numberPointWidth);
+    if (_taskMode == TaskMode.off) return base;
+    final index = _taskIndex();
+    TaskLineKind? kind;
+    for (final child in block.children) {
+      final info = index.byLine[child];
+      if (info == null) continue;
+      kind = info.kind;
+      if (kind == TaskLineKind.task) break;
+    }
+    if (kind == null) return base;
+    if (kind == TaskLineKind.task) {
+      return HorizontalSpacing(max(base.left, kTaskLeadingWidth), base.right);
+    }
+    final fontSize =
+        DefaultStyles.getInstance(context).paragraph?.style.fontSize ?? 16;
+    return HorizontalSpacing(
+        base.left + kTaskLeadingWidth - fontSize * 2, base.right);
+  }
 
   /// Позиции всех разделителей в документе
   List<int> _dividerOffsets() {
@@ -278,9 +488,14 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
     // не ссылка — обычная вставка редактора (замена выделения, форматирование и т.д.)
     try {
       // тот же метод, который Quill сам вызывает на Ctrl+V
+      _taskPasteUntil = DateTime.now().add(const Duration(seconds: 2));
       // ignore: experimental_member_use
       await _ec.clipboardPaste();
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      // изменение доходит до чистки задач чуть позже — короткий запас
+      _taskPasteUntil = DateTime.now().add(const Duration(milliseconds: 300));
+    }
   }
 
   /// Ссылка на диапазон [start, start+len) или вставка [label] в позицию [start].
@@ -374,6 +589,8 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
   @override
   void dispose() {
     _linkMenuTimer?.cancel();
+    _taskDocSub?.cancel();
+    _taskBusyLine.dispose();
     super.dispose();
   }
 
@@ -523,6 +740,13 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
   }
 
   void _toggle(Attribute attr) {
+    // списки не превращают задачи в обычные пункты
+    if (attr.key == Attribute.list.key &&
+        _taskMode == TaskMode.interactive &&
+        selectionTouchesTask(_ec.document, _ec.selection)) {
+      _ef.requestFocus();
+      return;
+    }
     _ec.formatSelection(
       _isActive(attr) ? Attribute.clone(attr, null) : attr,
     );
