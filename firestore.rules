@@ -58,5 +58,36 @@ service cloud.firestore {
         && (request.resource.data.updatedAt == request.time
             || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['order']));
     }
+
+    // Настройки шаблонов дня — один документ users/{uid}/settings/templates:
+    // { version: 1, weekdays: {"1".."7": delta}, blocks: {id: delta},
+    //   updatedAt: serverTimestamp }. Приложение пишет его целиком (set).
+    function okTemplateDelta(m, k) {
+      return !(k in m) || (m[k] is string && m[k].size() <= 100000);
+    }
+
+    function isValidTemplates(d) {
+      return d.keys().hasOnly(['version', 'weekdays', 'blocks', 'updatedAt'])
+        && d.keys().hasAll(['version', 'weekdays', 'blocks', 'updatedAt'])
+        && d.version == 1
+        && d.weekdays is map
+        && d.weekdays.keys().hasOnly(['1', '2', '3', '4', '5', '6', '7'])
+        && okTemplateDelta(d.weekdays, '1') && okTemplateDelta(d.weekdays, '2')
+        && okTemplateDelta(d.weekdays, '3') && okTemplateDelta(d.weekdays, '4')
+        && okTemplateDelta(d.weekdays, '5') && okTemplateDelta(d.weekdays, '6')
+        && okTemplateDelta(d.weekdays, '7')
+        && d.blocks is map
+        && d.blocks.keys().hasOnly(['vadimWeek', 'monthlyReport', 'holidayNote'])
+        && okTemplateDelta(d.blocks, 'vadimWeek')
+        && okTemplateDelta(d.blocks, 'monthlyReport')
+        && okTemplateDelta(d.blocks, 'holidayNote')
+        && d.updatedAt == request.time;
+    }
+
+    match /users/{userId}/settings/{docId} {
+      allow read, delete: if isOwner(userId) && docId == 'templates';
+      allow create, update: if isOwner(userId) && docId == 'templates'
+        && isValidTemplates(request.resource.data);
+    }
   }
 }
