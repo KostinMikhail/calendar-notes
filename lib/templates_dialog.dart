@@ -365,14 +365,16 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
                       border: Border.all(color: kDivider),
                     ),
                     child: Builder(
-                      builder: (editorContext) => QuillEditor(
-                        controller: _tc,
-                        focusNode: _tf,
-                        scrollController: _scroll,
-                        config: _editorConfig(
-                            'Пустой шаблон — день начнётся с чистого листа',
-                            editorContext),
-                      ),
+                      builder: (editorContext) => _withFormatMenu(
+                          QuillEditor(
+                            controller: _tc,
+                            focusNode: _tf,
+                            scrollController: _scroll,
+                            config: _editorConfig(
+                                'Пустой шаблон — день начнётся с чистого листа',
+                                editorContext),
+                          ),
+                          _scroll),
                     ),
                   ),
                 ),

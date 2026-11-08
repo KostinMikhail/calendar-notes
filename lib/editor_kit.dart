@@ -8,6 +8,9 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
   QuillController get _ec;
   FocusNode get _ef;
 
+  /// Ключ редактора: через него плавающее меню находит выделение на экране
+  final GlobalKey<EditorState> _quillKey = GlobalKey<EditorState>();
+
   // --- разделители: курсор не должен на них попадать ---
   int? _prevCaret;
   bool _snapping = false;
@@ -39,6 +42,12 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
       }
       if (physical == PhysicalKeyboardKey.digit8) {
         if (event is KeyDownEvent) _toggle(Attribute.ul);
+        return KeyEventResult.handled;
+      }
+      // Ctrl+Shift+X — зачёркнутый
+      if (isStrikeHotkey(
+          ctrl: ctrl, shift: shift, alt: alt, physical: physical)) {
+        if (event is KeyDownEvent) _toggle(Attribute.strikeThrough);
         return KeyEventResult.handled;
       }
       // Ctrl+Shift+«минус» — разделитель (и не масштаб страницы в браузере)
@@ -196,6 +205,7 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
   QuillEditorConfig _editorConfig(
           String placeholder, BuildContext editorContext) =>
       QuillEditorConfig(
+        editorKey: _quillKey,
         placeholder: placeholder,
         padding: EdgeInsets.zero,
         expands: true,
@@ -881,6 +891,16 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
 
   // ---------- элементы интерфейса ----------
 
+  /// Редактор с плавающим меню над выделением (жирный, зачёркнутый, цвет)
+  Widget _withFormatMenu(QuillEditor editor, ScrollController scroll) =>
+      FormatMenuHost(
+        controller: _ec,
+        focusNode: _ef,
+        editorKey: _quillKey,
+        scrollController: scroll,
+        child: editor,
+      );
+
   Widget _toolButton({
     required IconData icon,
     required String tooltip,
@@ -964,7 +984,7 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
             ),
             _toolButton(
               icon: Icons.strikethrough_s,
-              tooltip: 'Зачёркнутый',
+              tooltip: 'Зачёркнутый (Ctrl+Shift+X)',
               active: _isActive(Attribute.strikeThrough),
               onPressed: () => _toggle(Attribute.strikeThrough),
             ),

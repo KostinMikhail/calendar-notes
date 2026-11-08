@@ -27,6 +27,16 @@ bool isDividerHotkey({
         logical == LogicalKeyboardKey.underscore ||
         logical == LogicalKeyboardKey.numpadSubtract);
 
+/// Ctrl+Shift+X — зачёркнутый. По физической клавише: в русской раскладке
+/// та же клавиша — «Ч».
+bool isStrikeHotkey({
+  required bool ctrl,
+  required bool shift,
+  required bool alt,
+  required PhysicalKeyboardKey physical,
+}) =>
+    ctrl && shift && !alt && physical == PhysicalKeyboardKey.keyX;
+
 /// Изменение документа для вставки разделителя (операции Delta) и где
 /// поставить курсор после неё
 class DividerInsert {

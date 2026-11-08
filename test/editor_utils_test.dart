@@ -45,6 +45,24 @@ final List<Map<String, dynamic>> listLine = [
 ];
 
 void main() {
+  group('Ctrl+Shift+X — зачёркнутый', () {
+    bool hk(PhysicalKeyboardKey p,
+            {bool ctrl = true, bool shift = true, bool alt = false}) =>
+        isStrikeHotkey(ctrl: ctrl, shift: shift, alt: alt, physical: p);
+
+    test('клавиша X (в русской раскладке «Ч») с Ctrl+Shift', () {
+      expect(hk(PhysicalKeyboardKey.keyX), isTrue);
+    });
+
+    test('без Ctrl/Shift, с Alt или другая клавиша — нет', () {
+      expect(hk(PhysicalKeyboardKey.keyX, shift: false), isFalse); // Ctrl+X — вырезать
+      expect(hk(PhysicalKeyboardKey.keyX, ctrl: false), isFalse);
+      expect(hk(PhysicalKeyboardKey.keyX, alt: true), isFalse);
+      expect(hk(PhysicalKeyboardKey.keyC), isFalse);
+      expect(hk(PhysicalKeyboardKey.minus), isFalse);
+    });
+  });
+
   group('сочетание клавиш разделителя', () {
     bool hk(LogicalKeyboardKey l, PhysicalKeyboardKey p,
             {bool ctrl = true, bool shift = true, bool alt = false}) =>

@@ -19,6 +19,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'backup.dart';
 import 'dividers.dart';
 import 'firebase_options.dart';
+import 'format_menu.dart';
 import 'offline.dart';
 import 'search.dart' show findInText, kObjectReplacement;
 import 'search_dialog.dart';
@@ -822,6 +823,15 @@ class _CalendarPageState extends State<CalendarPage>
   final FirebaseFirestore _db = FirebaseFirestore.instance;
 
   bool _calendarVisible = true;
+
+  /// Панель форматирования над заметкой (запоминается на этом устройстве)
+  static const _toolbarPref = ToolbarVisibilityPref();
+  bool _toolbarVisible = _toolbarPref.load();
+
+  void _toggleToolbar() {
+    setState(() => _toolbarVisible = !_toolbarVisible);
+    _toolbarPref.save(_toolbarVisible);
+  }
   bool _showMonths = false;
   int _pickerYear = DateTime.now().year;
 
@@ -2866,6 +2876,10 @@ class _CalendarPageState extends State<CalendarPage>
                 tooltip: 'Поиск по заметкам',
                 onPressed: _openSearch,
               ),
+              ToolbarToggleButton(
+                visible: _toolbarVisible,
+                onPressed: _toggleToolbar,
+              ),
               const SizedBox(width: 6),
               Expanded(
                 child: _openTopicId != null
@@ -2884,16 +2898,19 @@ class _CalendarPageState extends State<CalendarPage>
             ],
           ),
           const SizedBox(height: 14),
-          Container(
-            padding: const EdgeInsets.all(6),
-            decoration: BoxDecoration(
-              color: kCard,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: kDivider),
+          // панель форматирования — по кнопке в шапке (по умолчанию скрыта)
+          CollapsibleToolbar(
+            visible: _toolbarVisible,
+            child: Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: kCard,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: kDivider),
+              ),
+              child: _toolbar(),
             ),
-            child: _toolbar(),
           ),
-          const SizedBox(height: 12),
           ValueListenableBuilder<bool>(
             valueListenable: _unknownDay,
             builder: (context, unknown, _) => unknown && _openTopicId == null
@@ -2937,16 +2954,18 @@ class _CalendarPageState extends State<CalendarPage>
                   ),
                   // Builder: стили редактора берутся из контекста под Material
                   Builder(
-                    builder: (editorContext) => QuillEditor(
-                      controller: _controller,
-                      focusNode: _editorFocus,
-                      scrollController: _editorScroll,
-                      config: _editorConfig(
-                          _openTopicId != null
-                              ? 'Заметки по теме...'
-                              : 'Что важного в этот день...',
-                          editorContext),
-                    ),
+                    builder: (editorContext) => _withFormatMenu(
+                        QuillEditor(
+                          controller: _controller,
+                          focusNode: _editorFocus,
+                          scrollController: _editorScroll,
+                          config: _editorConfig(
+                              _openTopicId != null
+                                  ? 'Заметки по теме...'
+                                  : 'Что важного в этот день...',
+                              editorContext),
+                        ),
+                        _editorScroll),
                   ),
                 ],
               ),
