@@ -99,6 +99,10 @@ TaskStep taskStep(TaskState from, TaskControl control) {
   }
 }
 
+/// Перенос и отмена переноса — транзакции Firestore: без связи они не
+/// работают (в отличие от обычных записей, которые ждут в очереди)
+bool taskStepNeedsNetwork(TaskStep step) => step.carry || step.uncarry;
+
 // ============================================================
 //  Даты
 // ============================================================
@@ -952,6 +956,9 @@ Delta? sanitizeTasks(Document doc, DocChange change, TaskMode mode,
 const Color kTaskCrossColor = Color(0xFFFF6B6B);
 const Color kTaskCheckColor = Color(0xFF4FD08A);
 
+/// Подсказка у ✗ без связи
+const String kTaskNeedNetwork = 'Нужна сеть для переноса задачи';
+
 /// Цвет текста выполненной задачи
 const Color kTaskDoneTextColor = Color(0xFF6FDC9B);
 
@@ -968,6 +975,7 @@ class TaskControls extends StatelessWidget {
     this.crossTooltip,
     this.onCross,
     this.onCheck,
+    this.crossDisabled = false,
   });
 
   final TaskValue value;
@@ -981,9 +989,20 @@ class TaskControls extends StatelessWidget {
   final VoidCallback? onCross;
   final VoidCallback? onCheck;
 
+  /// Нет связи: ✗ (перенос) недоступен
+  final bool crossDisabled;
+
   @override
   Widget build(BuildContext context) {
     final carried = !inert && value.state == TaskState.carried;
+    final cross = _TaskBox(
+      color: kTaskCrossColor,
+      icon: Icons.close_rounded,
+      active: carried,
+      busy: busy,
+      tooltip: inert ? null : (crossDisabled ? kTaskNeedNetwork : crossTooltip),
+      onTap: inert || crossDisabled ? null : onCross,
+    );
     final done = !inert && value.state == TaskState.done;
     return Align(
       alignment: Alignment.topLeft,
@@ -992,14 +1011,7 @@ class TaskControls extends StatelessWidget {
         height: 24,
         child: Row(
           children: [
-            _TaskBox(
-              color: kTaskCrossColor,
-              icon: Icons.close_rounded,
-              active: carried,
-              busy: busy,
-              tooltip: inert ? null : crossTooltip,
-              onTap: inert ? null : onCross,
-            ),
+            crossDisabled && !inert ? Opacity(opacity: 0.35, child: cross) : cross,
             _TaskBox(
               color: kTaskCheckColor,
               icon: Icons.check_rounded,

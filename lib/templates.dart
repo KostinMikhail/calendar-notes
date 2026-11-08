@@ -24,6 +24,8 @@ import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_quill/flutter_quill.dart' show Document;
 
+import 'offline.dart';
+
 const String kNotForgetTitle = 'Не забыть:';
 
 /// Заголовок блока задач (у его пунктов — кнопки ✗/✓, см. tasks.dart)
@@ -478,12 +480,26 @@ abstract class TemplateStore {
   /// Нет документа — стандартные шаблоны
   Future<TemplateSettings> load();
   Future<void> save(TemplateSettings settings);
+
+  /// Последнее сохранение пока только на устройстве (нет связи)
+  bool get lastSaveQueued => false;
 }
 
 /// users/{uid}/settings/templates. [ref] — null, если нет входа.
 class FirestoreTemplateStore implements TemplateStore {
-  FirestoreTemplateStore(this.ref);
+  FirestoreTemplateStore(this.ref, {this.offline, this.onLateError});
   final DocumentReference<Map<String, dynamic>>? Function() ref;
+
+  /// Сейчас нет связи (тогда читаем из локальной копии)
+  final bool Function()? offline;
+
+  /// Сохранение, ушедшее в очередь без связи, позже отклонено сервером
+  final void Function(Object error)? onLateError;
+
+  bool _lastQueued = false;
+
+  @override
+  bool get lastSaveQueued => _lastQueued;
 
   DocumentReference<Map<String, dynamic>> get _doc {
     final r = ref();
@@ -493,13 +509,28 @@ class FirestoreTemplateStore implements TemplateStore {
 
   @override
   Future<TemplateSettings> load() async {
-    final snap = await _doc.get();
-    return TemplateSettings.fromMap(snap.data());
+    final r = await readDoc(_doc, offline: offline?.call() ?? false);
+    final snap = r.value;
+    // без связи и без локальной копии настройки неизвестны: стандартные
+    // шаблоны при сохранении затёрли бы настоящие
+    if (r.fromCache && (snap == null || !snap.exists)) {
+      throw FirebaseException(
+          plugin: 'cloud_firestore',
+          code: 'unavailable',
+          message: 'Настроек шаблонов нет на устройстве');
+    }
+    return TemplateSettings.fromMap(snap?.data());
   }
 
   @override
-  Future<void> save(TemplateSettings settings) => _doc
-      // set без merge: документ заменяется целиком (так проверяют правила)
-      .set({...settings.toMap(), 'updatedAt': FieldValue.serverTimestamp()})
-      .timeout(const Duration(seconds: 30));
+  Future<void> save(TemplateSettings settings) async {
+    // set без merge: документ заменяется целиком (так проверяют правила).
+    // Без связи — не ждём сервер: запись уже в очереди на устройстве.
+    final ack = await waitAck(
+      _doc.set(
+          {...settings.toMap(), 'updatedAt': FieldValue.serverTimestamp()}),
+      onLateError: (e) => onLateError?.call(e),
+    );
+    _lastQueued = ack == WriteAck.queued;
+  }
 }

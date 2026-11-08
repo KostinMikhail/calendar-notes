@@ -18,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'backup.dart';
 import 'firebase_options.dart';
+import 'offline.dart';
 import 'search.dart' show findInText, kObjectReplacement;
 import 'search_dialog.dart';
 import 'tasks.dart';
@@ -43,6 +44,8 @@ Future<void> _initFirebase() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+  // локальная копия заметок на устройстве — до любого обращения к Firestore
+  await configureFirestoreCache(FirebaseFirestore.instance);
   if (kIsWeb) {
     // Веб: сессия хранится в localStorage и переживает перезагрузку
     // страницы и закрытие браузера. На Android/iOS Firebase сам хранит
@@ -557,6 +560,7 @@ class _LoginPageState extends State<LoginPage> {
     final password = _password.text;
     if (email.isEmpty) return _show(error: 'Введите email');
     if (password.isEmpty) return _show(error: 'Введите пароль');
+    if (browserSaysOffline) return _show(error: kNeedNetworkSignIn);
 
     setState(() {
       _busy = true;
@@ -584,6 +588,7 @@ class _LoginPageState extends State<LoginPage> {
     if (email.isEmpty) {
       return _show(error: 'Введите email, на который прислать ссылку для сброса');
     }
+    if (browserSaysOffline) return _show(error: kNeedNetwork);
     setState(() {
       _busy = true;
       _error = null;
@@ -822,17 +827,45 @@ class _CalendarPageState extends State<CalendarPage>
   String _lastSeenJson = '';
   int _lastLen = 0;
   String? _loadedKey; // для какого дня заметка уже загружена
-  bool _saving = false;
+
+  // --- работа без сети (логика — offline.dart) ---
+  final ConnectionMonitor _conn = ConnectionMonitor();
+  final SaveTracker _saves = SaveTracker();
+  late final OfflineDownloader _download = OfflineDownloader(
+    source: FirestoreCopySource(() => _userRef),
+    marker: const LocalCopyMarker(),
+    uid: widget.uid,
+    isOffline: () => _conn.offline,
+    markerTrusted: !offlineCacheLimited,
+  );
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _connSub;
+  Timer? _downloadStart;
+
+  /// Открыт «неизвестный» день (isUnknownDay) — предупреждение над редактором
+  final ValueNotifier<bool> _unknownDay = ValueNotifier<bool>(false);
+
+  /// Поиск взял заметки из локальной копии
+  bool _searchFromCache = false;
+
+  /// «Сохранённое содержимое» после отказа сервера: не совпадает ни с каким
+  /// текстом — заметка снова несохранённая, автосохранение повторит запись
+  static const String _rejectedMark = '\u0000rejected';
+
+  bool get _offline => _conn.offline;
 
   // --- темы: открытая тема вместо дня ---
   String? _openTopicId; // null — в центре заметка выбранного дня
   int _loadSeq = 0; // номер последней загрузки: старые результаты не применяются
-  late final TopicsController _topics =
-      TopicsController(FirestoreTopicStore(() => _topicsRef));
+  late final TopicsController _topics = TopicsController(FirestoreTopicStore(
+      () => _topicsRef,
+      offline: () => _offline,
+      onLateError: _onTopicLateError));
 
   // --- шаблоны дня: загружаются один раз за сеанс ---
-  late final TemplateStore _templateStore =
-      FirestoreTemplateStore(() => _templatesRef);
+  late final TemplateStore _templateStore = FirestoreTemplateStore(
+      () => _templatesRef,
+      offline: () => _offline,
+      onLateError: _onTemplatesLateError);
   TemplateSettings _templateSettings = TemplateSettings.defaults;
   bool _templatesLoaded = false; // настройки получены (или их точно нет)
   Future<void>? _templatesLoading;
@@ -872,6 +905,16 @@ class _CalendarPageState extends State<CalendarPage>
     HardwareKeyboard.instance.addHandler(_onGlobalKey);
     WidgetsBinding.instance.addObserver(this);
     _controller.addListener(_onControllerChanged);
+    _saves.onRejected = _onSaveRejected;
+    _saves.addListener(_onSavesChanged);
+    _conn.addReconnectListener(_onReconnect);
+    if (browserSaysOffline) _conn.browserChanged(false);
+    listenBrowserOnline((online) {
+      if (mounted) _conn.browserChanged(online);
+    });
+    _watchConnection();
+    // копия всех заметок на устройство — в фоне, после открытия первого дня
+    _downloadStart = Timer(const Duration(seconds: 3), _download.run);
     _templatesLoading = _loadTemplateSettings();
     _loadNote(_selectedDay);
     _topics.load();
@@ -883,6 +926,13 @@ class _CalendarPageState extends State<CalendarPage>
   void dispose() {
     _hideTaskPopup();
     _noteSub?.cancel();
+    _connSub?.cancel();
+    _downloadStart?.cancel();
+    _download.dispose();
+    _saves.dispose();
+    _conn.dispose();
+    _unknownDay.dispose();
+    setLeaveGuard(false);
     HardwareKeyboard.instance.removeHandler(_onGlobalKey);
     WidgetsBinding.instance.removeObserver(this);
     _autoTimer?.cancel();
@@ -957,7 +1007,21 @@ class _CalendarPageState extends State<CalendarPage>
                 style: const TextStyle(color: kTextSecondary, fontSize: 13)),
           ),
         item('backup', Icons.download_outlined, 'Создать резервную копию'),
-        item('restore', Icons.upload_outlined, 'Восстановить из копии'),
+        if (_offline)
+          const PopupMenuItem<String>(
+            enabled: false,
+            height: 40,
+            child: Row(
+              children: [
+                Icon(Icons.upload_outlined, size: 18, color: kTextSecondary),
+                SizedBox(width: 10),
+                Text('Восстановить из копии — $kNeedNetwork',
+                    style: TextStyle(color: kTextSecondary)),
+              ],
+            ),
+          )
+        else
+          item('restore', Icons.upload_outlined, 'Восстановить из копии'),
         item('templates', Icons.view_agenda_outlined, 'Шаблоны'),
         const PopupMenuDivider(),
         const PopupMenuItem<String>(
@@ -982,10 +1046,10 @@ class _CalendarPageState extends State<CalendarPage>
   /// Дожидается текущего сохранения и сохраняет несохранённые правки.
   /// false — правки сохранить не удалось.
   Future<bool> _flushPendingSave() async {
-    for (var i = 0; (_saving || _taskBusy) && i < 300; i++) {
+    for (var i = 0; _taskBusy && i < 300; i++) {
       await Future.delayed(const Duration(milliseconds: 100));
     }
-    if (_saving || _taskBusy) return false;
+    if (_taskBusy) return false;
     if (_loadedKey == _targetKey && _isDirty) {
       await _saveNote();
     }
@@ -1043,22 +1107,41 @@ class _CalendarPageState extends State<CalendarPage>
 
       List<BackupNote> list;
       var topicList = const <BackupTopic>[];
+      var fromDevice = false;
       try {
-        final snap = await notes
-            .where(FieldPath.documentId, isGreaterThanOrEqualTo: from)
-            .where(FieldPath.documentId, isLessThanOrEqualTo: to)
-            .get(const GetOptions(source: Source.server))
-            .timeout(const Duration(seconds: 60));
-        list = notesForExport({for (final d in snap.docs) d.id: d.data()},
+        // с сервера; без связи (или пока последние правки не ушли на
+        // сервер) — из локальной копии: в ней есть и ещё не отправленное
+        var useCache = _offline;
+        if (!useCache) {
+          try {
+            await _db
+                .waitForPendingWrites()
+                .timeout(const Duration(seconds: 10));
+          } catch (_) {
+            useCache = true;
+          }
+        }
+        final snap = await readQuery(
+            notes
+                .where(FieldPath.documentId, isGreaterThanOrEqualTo: from)
+                .where(FieldPath.documentId, isLessThanOrEqualTo: to),
+            offline: useCache,
+            serverOnly: true,
+            timeout: const Duration(seconds: 60));
+        fromDevice = snap.fromCache;
+        list = notesForExport(
+            {for (final d in snap.value.docs) d.id: d.data()},
             today: today);
         // темы — все, без привязки к периоду
         final topicsCol = _topicsRef;
         if (topicsCol != null) {
-          final tsnap = await topicsCol
-              .get(const GetOptions(source: Source.server))
-              .timeout(const Duration(seconds: 60));
-          topicList =
-              topicsForExport({for (final d in tsnap.docs) d.id: d.data()});
+          final tsnap = await readQuery(topicsCol,
+              offline: useCache || fromDevice,
+              serverOnly: true,
+              timeout: const Duration(seconds: 60));
+          fromDevice = fromDevice || tsnap.fromCache;
+          topicList = topicsForExport(
+              {for (final d in tsnap.value.docs) d.id: d.data()});
         }
       } on BackupException catch (e) {
         await _showMessage('Копия не создана', e.message, error: true);
@@ -1105,7 +1188,8 @@ class _CalendarPageState extends State<CalendarPage>
           'Файл: $name\n'
               'Заметок: ${list.length}\n'
               'Тем: ${topicList.length}\n'
-              'Период: $period');
+              'Период: $period'
+              '${fromDevice ? _deviceCopyNote() : ''}');
     } finally {
       if (mounted) setState(() => _backupBusy = false);
     }
@@ -1159,9 +1243,25 @@ class _CalendarPageState extends State<CalendarPage>
     return 'тема «${_topics.byId(id)?.title ?? id}»';
   }
 
+  /// Пояснение к копии, собранной без сервера
+  String _deviceCopyNote() =>
+      '\n\nСобрана из локальной копии на устройстве (нет связи с сервером).'
+      '${_download.complete ? '' : ' Полная копия заметок на это устройство '
+          'ещё не загружалась — часть старых заметок могла не попасть.'}';
+
   Future<void> _restoreBackup() async {
     if (_backupBusy) return;
     if (_notes == null) return;
+    // восстановление читает и пишет сервер (с откатом при сбое) — без сети
+    // не начинаем
+    if (_offline) {
+      await _showMessage(
+          kNeedNetwork,
+          'Восстановление из копии работает только при подключении к '
+              'интернету. Ничего не изменено.',
+          error: true);
+      return;
+    }
     setState(() => _backupBusy = true);
     var touched = false;
     try {
@@ -1222,6 +1322,18 @@ class _CalendarPageState extends State<CalendarPage>
         await _showMessage(
             'Восстановление отменено',
             'Не удалось сохранить текущую заметку. Проверьте интернет и '
+                'попробуйте снова. Ничего не изменено.',
+            error: true);
+        return;
+      }
+      // все правки должны дойти до сервера (восстановление читает сервер)
+      try {
+        if (_offline) throw StateError('offline');
+        await _db.waitForPendingWrites().timeout(const Duration(seconds: 15));
+      } catch (_) {
+        await _showMessage(
+            kNeedNetwork,
+            'Последние правки ещё не дошли до сервера. Проверьте интернет и '
                 'попробуйте снова. Ничего не изменено.',
             error: true);
         return;
@@ -1322,13 +1434,14 @@ class _CalendarPageState extends State<CalendarPage>
     if (_signingOut) return;
 
     // сначала сохраняем последние правки (и дожидаемся переноса задачи)
-    while (_saving || _taskBusy) {
+    while (_taskBusy) {
       await Future.delayed(const Duration(milliseconds: 100));
     }
     if (_loadedKey == _targetKey && _isDirty) {
       await _saveNote();
     }
     if (!mounted) return;
+    var confirmed = false;
     if (_loadedKey == _targetKey && _isDirty) {
       final leave = await showDialog<bool>(
         context: context,
@@ -1337,6 +1450,33 @@ class _CalendarPageState extends State<CalendarPage>
           title: const Text('Изменения не сохранены'),
           content: const Text(
               'Последние правки не удалось сохранить. Выйти и потерять их?'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Остаться')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Выйти')),
+          ],
+        ),
+      );
+      if (leave != true || !mounted) return;
+      confirmed = true;
+    }
+
+    // правки, которые ещё не дошли до сервера (нет связи): локальная копия
+    // остаётся на устройстве, но без входа отправить их некому
+    if (!confirmed &&
+        await hasUnsyncedWrites(
+            waitForPendingWrites: _db.waitForPendingWrites,
+            hasRejected: () => _saves.hasRejected)) {
+      if (!mounted) return;
+      final leave = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: kSurface,
+          title: const Text(kSignOutPendingTitle),
+          content: const Text(kSignOutPendingBody),
           actions: [
             TextButton(
                 onPressed: () => Navigator.pop(ctx, false),
@@ -1359,6 +1499,7 @@ class _CalendarPageState extends State<CalendarPage>
     _lastSeenJson = '';
     _lastLen = 0;
     _docIsDay = false;
+    _unknownDay.value = false;
     _controller.document = Document();
     _status.value = '';
 
@@ -1393,18 +1534,22 @@ class _CalendarPageState extends State<CalendarPage>
   late final NoteSearchCache _searchCache = NoteSearchCache(() async {
     final notes = _notes;
     if (notes == null) throw StateError('signed out');
-    // только с сервера: без связи — ошибка, а не пустой кэш
-    final snap = await notes
-        .get(const GetOptions(source: Source.server))
-        .timeout(const Duration(seconds: 30));
-    return {for (final d in snap.docs) d.id: d.data()};
+    // с сервера; без связи — из локальной копии (в окне — подсказка)
+    final snap = await readQuery(notes,
+        offline: _offline,
+        serverOnly: true,
+        timeout: const Duration(seconds: 10));
+    _searchFromCache = snap.fromCache;
+    return {for (final d in snap.value.docs) d.id: d.data()};
   }, loadTopics: () async {
     final topics = _topicsRef;
     if (topics == null) throw StateError('signed out');
-    final snap = await topics
-        .get(const GetOptions(source: Source.server))
-        .timeout(const Duration(seconds: 30));
-    return {for (final d in snap.docs) d.id: d.data()};
+    final snap = await readQuery(topics,
+        offline: _offline || _searchFromCache,
+        serverOnly: true,
+        timeout: const Duration(seconds: 10));
+    if (snap.fromCache) _searchFromCache = true;
+    return {for (final d in snap.value.docs) d.id: d.data()};
   });
 
   /// Слова, которые нужно выделить, когда загрузится этот день
@@ -1425,6 +1570,7 @@ class _CalendarPageState extends State<CalendarPage>
         return !d.isBefore(kCalendarFirstDay) && !d.isAfter(kCalendarLastDay);
       },
       topics: () => _topics.topics,
+      localCopy: () => _offline || _searchFromCache,
     );
     if (pick == null || !mounted) return;
     final pickedTopic = topicIdOf(pick.key);
@@ -1475,14 +1621,19 @@ class _CalendarPageState extends State<CalendarPage>
   Future<void> _loadNoteInner(DateTime day) async {
     final key = _dayKey(day);
     _loadedKey = null; // пока не загрузили — сохранять нельзя (чтобы не затереть заметку)
+    _unknownDay.value = false;
     final seq = ++_loadSeq;
 
     final notes = _notes;
     if (notes == null) return;
 
-    DocumentSnapshot<Map<String, dynamic>> doc;
+    DocumentSnapshot<Map<String, dynamic>>? doc;
+    var fromCache = false;
     try {
-      doc = await notes.doc(key).get();
+      // без связи (или сервер молчит дольше 3 с) — из локальной копии
+      final r = await readDoc(notes.doc(key), offline: _offline);
+      doc = r.value;
+      fromCache = r.fromCache;
     } on FirebaseException catch (e) {
       if (seq == _loadSeq) _setStatus('Не удалось загрузить (${e.code})');
       return;
@@ -1495,7 +1646,7 @@ class _CalendarPageState extends State<CalendarPage>
 
     var accent = _pickAccent();
     Document document;
-    final data = doc.data();
+    final data = doc?.data();
     final delta = data?['delta'];
     final text = (data?['text'] ?? '').toString();
 
@@ -1519,6 +1670,16 @@ class _CalendarPageState extends State<CalendarPage>
       accent = usedAccent;
     }
 
+    // запись этого дня отклонил сервер — показываем свой текст, а не откат
+    final rejected = _saves.rejected(key);
+    if (rejected != null) {
+      try {
+        document = Document.fromJson(jsonDecode(rejected.payload.json));
+      } catch (_) {}
+      final a = rejected.payload.accent;
+      if (a != null && a.isNotEmpty) accent = a;
+    }
+
     // запоминаем «эталон» до подмены документа, чтобы загрузка не считалась правкой
     final json = jsonEncode(document.toDelta().toJson());
     _lastSavedJson = json;
@@ -1531,6 +1692,15 @@ class _CalendarPageState extends State<CalendarPage>
     _loadedKey = key;
     _setStatus('');
     _watchNote(key);
+    if (rejected != null) {
+      _lastSavedJson = _rejectedMark; // автосохранение повторит запись
+      _setStatus(_saveErrorText(rejected.error));
+    }
+    // без сервера и без локальной копии этого дня — предупреждение
+    _unknownDay.value = isUnknownDay(
+        fromCache: fromCache,
+        exists: doc?.exists ?? false,
+        downloadComplete: _download.complete);
 
     // переход из поиска — выделить найденное
     final find = _pendingFind;
@@ -1577,6 +1747,7 @@ class _CalendarPageState extends State<CalendarPage>
   Future<void> _loadTopicInner(String id) async {
     final key = topicKey(id);
     _unwatchNote();
+    _unknownDay.value = false;
     _loadedKey = null; // пока не загрузили — сохранять нельзя
     final seq = ++_loadSeq;
     if (_notes == null) return;
@@ -1612,6 +1783,13 @@ class _CalendarPageState extends State<CalendarPage>
     } else {
       document = Document()..insert(0, content.text);
     }
+    // запись темы отклонил сервер — показываем свой текст
+    final rejected = _saves.rejected(key);
+    if (rejected != null) {
+      try {
+        document = Document.fromJson(jsonDecode(rejected.payload.json));
+      } catch (_) {}
+    }
 
     final json = jsonEncode(document.toDelta().toJson());
     _lastSavedJson = json;
@@ -1622,6 +1800,10 @@ class _CalendarPageState extends State<CalendarPage>
     _setEditorDocument(document);
     _loadedKey = key;
     _setStatus('');
+    if (rejected != null) {
+      _lastSavedJson = _rejectedMark; // автосохранение повторит запись
+      _setStatus(_saveErrorText(rejected.error));
+    }
 
     final find = _pendingFind;
     _pendingFind = null;
@@ -1641,54 +1823,70 @@ class _CalendarPageState extends State<CalendarPage>
     if (_isDirty) _saveNote();
   }
 
+  /// Сохранение открытой заметки. Запись ставится в очередь Firestore
+  /// сразу (до первого await) — значит, правки уже на устройстве: смена дня
+  /// может не ждать. Ответ сервера ждём не дольше пары секунд (без связи —
+  /// «Сохранено на устройстве»); позднее подтверждение или отказ разбирает
+  /// SaveTracker (_onSavesChanged / _onSaveRejected).
   Future<void> _saveNote() async {
-    // сохраняем только то, что загружено в редактор, и только туда же
+    // сохраняем только то, что загружено в редактор, только туда же и
+    // только если что-то изменили (нетронутый шаблон не пишем)
     final key = _targetKey;
-    if (_loadedKey != key || _saving) return;
+    final json = _currentJson();
+    if (!shouldSaveDay(
+        loadedKey: _loadedKey,
+        targetKey: key,
+        currentJson: json,
+        savedJson: _lastSavedJson)) {
+      return;
+    }
     final notes = _notes;
     if (notes == null) return;
     final topicId = topicIdOf(key);
-    _saving = true;
-    final json = _currentJson();
     final plain = _controller.document.toPlainText().replaceAll('\uFFFC', '');
-    _setStatus('Сохранение...');
+    final accent = _accent;
+    _setStatus(kStatusSaving);
+    Future<void> write;
     try {
-      if (topicId != null) {
-        await _topics.store.saveContent(topicId, json, plain);
-        _topics.touch(topicId);
-        _searchCache.putTopicText(topicId, plain);
-      } else {
-        _savingJson = json; // своё же изменение вернётся из базы — не чужое
-        await notes.doc(key).set({
-          'delta': json,
-          'text': plain,
-          'accent': _accent,
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
-        _searchCache.put(key, plain);
-      }
-      if (key == _targetKey) _lastSavedJson = json;
-      _setStatus('Сохранено ✓');
-    } on FirebaseException catch (e) {
-      _setStatus('Ошибка сохранения (${e.code})');
-    } catch (_) {
-      _setStatus('Ошибка сохранения');
-    } finally {
-      _saving = false;
-      _savingJson = null;
+      write = topicId != null
+          ? _topics.store.saveContent(topicId, json, plain)
+          : notes.doc(key).set({
+              'delta': json,
+              'text': plain,
+              'accent': accent,
+              'updatedAt': FieldValue.serverTimestamp(),
+            });
+    } catch (e) {
+      _setStatus(_saveErrorText(e));
+      return;
     }
+    // запись в очереди (в локальной копии): эти правки уже сохранены
+    _lastSavedJson = json;
+    if (topicId != null) {
+      _topics.touch(topicId);
+      _searchCache.putTopicText(topicId, plain);
+    } else {
+      _searchCache.put(key, plain);
+    }
+    final out = await _saves.track(key, write,
+        SavePayload(json: json, text: plain, accent: topicId == null ? accent : null));
+    // пока ждали, открыли другое — статус того не трогаем
+    if (!mounted || key != _targetKey || _loadedKey != key) return;
+    if (out == SaveOutcome.acked) _setStatus(kStatusSaved);
+    if (out == SaveOutcome.queued) _setStatus(kStatusQueued);
+    // SaveOutcome.failed: статус и «несохранённость» — в _onSaveRejected
   }
 
   Future<void> _onDaySelected(DateTime selectedDay, DateTime focusedDay) async {
     if (_backupBusy) return; // идёт копия/восстановление
     // не теряем несохранённые правки предыдущего дня; перенос задачи
     // должен отметить задачу в этой же заметке — ждём и его
-    while (_saving || _taskBusy) {
+    while (_taskBusy) {
       await Future.delayed(const Duration(milliseconds: 100));
     }
-    if (_loadedKey == _targetKey && _isDirty) {
-      await _saveNote();
-    }
+    // запись уходит в очередь сразу; ответ сервера не ждём (без связи
+    // его может долго не быть)
+    if (_loadedKey == _targetKey && _isDirty) unawaited(_saveNote());
     if (!mounted) return;
     setState(() {
       _selectedDay = selectedDay;
@@ -1733,6 +1931,142 @@ class _CalendarPageState extends State<CalendarPage>
 
   bool _goingToday = false;
 
+  // ---------- работа без сети (логика — offline.dart) ----------
+
+  /// users/{uid} вошедшего пользователя (null — нет входа)
+  DocumentReference<Map<String, dynamic>>? get _userRef {
+    final user = FirebaseAuth.instance.currentUser;
+    if (_signingOut || user == null || user.uid != widget.uid) return null;
+    return _db.collection('users').doc(user.uid);
+  }
+
+  /// Постоянная подписка на маленький документ (настройки шаблонов):
+  /// снимок «из кэша» — связи с сервером нет
+  void _watchConnection() {
+    final ref = _templatesRef;
+    if (ref == null) return;
+    _connSub = ref.snapshots(includeMetadataChanges: true).listen(
+          (s) => _conn.storeChanged(s.metadata.isFromCache),
+          onError: (_) {},
+        );
+  }
+
+  /// Связь вернулась: очередь записей Firestore уходит сама; здесь —
+  /// фоновая копия и то, что не загрузилось без сети
+  void _onReconnect() {
+    if (!mounted || _signingOut) return;
+    _download.onReconnect();
+    if (_searchFromCache) {
+      _searchCache.invalidate();
+      _searchFromCache = false;
+    }
+    if (!_templatesLoaded) _templatesLoading = _loadTemplateSettings();
+    if (_topics.error != null) _topics.load();
+  }
+
+  void _onSavesChanged() {
+    if (!mounted) return;
+    // очередь ушла на сервер
+    if (!_saves.hasPending && _status.value == kStatusQueued) {
+      _setStatus(kStatusSaved);
+    }
+    // копия только в памяти вкладки: закрытие вкладки потеряло бы очередь
+    setLeaveGuard(offlineCacheLimited && _saves.hasUnsynced);
+  }
+
+  String _saveErrorText(Object e) => e is FirebaseException
+      ? 'Ошибка сохранения (${e.code})'
+      : 'Ошибка сохранения';
+
+  /// Сервер отклонил запись (сразу или когда появилась связь). Firestore
+  /// убирает её из локальной копии; текст не теряем.
+  void _onSaveRejected(String key, RejectedSave r) {
+    if (!mounted || _signingOut) return;
+    final topicId = topicIdOf(key);
+    if (topicId != null && _topics.byId(topicId) == null) {
+      _saves.forget(key); // тему удалили — её текст не нужен
+      return;
+    }
+    final msg = _saveErrorText(r.error);
+    if (_loadedKey == key && _targetKey == key) {
+      // в редакторе свой текст; «несохранённый» — автосохранение повторит
+      _lastSavedJson = _rejectedMark;
+      _setStatus(msg);
+      return;
+    }
+    // заметка уже закрыта: текст в памяти, покажем его при открытии
+    final where = topicId != null
+        ? 'тема «${_topics.byId(topicId)?.title ?? ''}»'
+        : formatRuDate(key);
+    _setStatus('$msg: $where');
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      duration: const Duration(seconds: 8),
+      content: Text('$msg: $where. Текст не потерян — откройте '
+          '${topicId != null ? 'тему' : 'этот день'}, и он сохранится снова.'),
+    ));
+  }
+
+  void _onTopicLateError(String what, Object e) {
+    if (!mounted || _signingOut) return;
+    _topicError(what, e);
+    _topics.load();
+  }
+
+  void _onTemplatesLateError(Object e) {
+    if (!mounted || _signingOut) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Шаблоны не сохранены на сервере: ${describeError(e)}')));
+    _templatesLoaded = false;
+    _templatesLoading = _loadTemplateSettings();
+  }
+
+  /// Строка статуса: подсказки о работе без сети и статус сохранения
+  Widget _statusRow() => ListenableBuilder(
+        listenable: Listenable.merge([_conn, _download]),
+        builder: (context, _) {
+          final progress = _download.progressText;
+          return Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (progress != null) ...[
+                Text(progress,
+                    style:
+                        const TextStyle(color: kTextSecondary, fontSize: 12)),
+                const SizedBox(width: 10),
+              ],
+              if (offlineCacheLimited) ...[
+                const Tooltip(
+                  message: kCacheLimitedHint,
+                  child: Text('Офлайн-защита ограничена',
+                      style: TextStyle(color: kTextSecondary, fontSize: 12)),
+                ),
+                const SizedBox(width: 10),
+              ],
+              if (_conn.offline) ...[
+                const _OfflineChip(),
+                const SizedBox(width: 8),
+              ],
+              Flexible(
+                child: ValueListenableBuilder<String>(
+                  valueListenable: _status,
+                  builder: (context, status, _) {
+                    Color color = kTextSecondary;
+                    if (status == kStatusSaved) color = kAccent;
+                    if (status.startsWith('Ошибка') ||
+                        status.startsWith('Не удалось')) {
+                      color = const Color(0xFFFF5C5C);
+                    }
+                    return Text(status,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: color, fontSize: 13));
+                  },
+                ),
+              ),
+            ],
+          );
+        },
+      );
+
   // ---------- этот же день изменили в другой вкладке ----------
   // Например, в соседней вкладке перенесли задачу на открытый здесь день.
   // Изменение из базы вливается в редактор поверх своих несохранённых
@@ -1741,18 +2075,23 @@ class _CalendarPageState extends State<CalendarPage>
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _noteSub;
   String? _noteSubKey;
 
-  /// Что сейчас записывается (его возврат из базы — не чужое изменение)
-  String? _savingJson;
-
   void _watchNote(String key) {
     if (_noteSubKey == key && _noteSub != null) return;
     _unwatchNote();
     final notes = _notes;
     if (notes == null) return;
     _noteSubKey = key;
-    _noteSub = notes.doc(key).snapshots().listen(
-          (snap) => _onRemoteNote(key, snap),
-          onError: (_) {}, // нет связи — просто не следим
+    // с изменениями метаданных: ответ сервера после связи приходит и
+    // тогда, когда содержимое не изменилось (снимает предупреждение
+    // «неизвестный день»)
+    _noteSub = notes.doc(key).snapshots(includeMetadataChanges: true).listen(
+          (snap) {
+            if (!snap.metadata.isFromCache && key == _loadedKey) {
+              _unknownDay.value = false;
+            }
+            _onRemoteNote(key, snap);
+          },
+          onError: (_) {}, // нет доступа — просто не следим
         );
   }
 
@@ -1766,10 +2105,13 @@ class _CalendarPageState extends State<CalendarPage>
       String key, DocumentSnapshot<Map<String, dynamic>> snap) {
     if (!mounted || _signingOut || snap.metadata.hasPendingWrites) return;
     if (_loadedKey != key || _targetKey != key || !_docIsDay) return;
+    // своя запись ещё не подтверждена или отклонена: снимок из базы может
+    // быть откатом — он не должен стереть текст в редакторе
+    if (_saves.isUnsettled(key)) return;
     final data = snap.data();
     final remoteJson = data?['delta'];
     if (data == null || remoteJson is! String || remoteJson.isEmpty) return;
-    if (remoteJson == _lastSavedJson || remoteJson == _savingJson) return;
+    if (remoteJson == _lastSavedJson) return;
     if (remoteJson == _currentJson()) {
       _lastSavedJson = remoteJson;
       return;
@@ -1834,6 +2176,15 @@ class _CalendarPageState extends State<CalendarPage>
   TaskMode get _taskMode => _docIsDay ? TaskMode.interactive : TaskMode.off;
 
   @override
+  Listenable? get _taskNetwork => _conn;
+
+  @override
+  bool get _taskOffline => _offline;
+
+  /// Перенос — транзакция: дольше ждать нельзя (смена дня ждёт переноса)
+  static const Duration _taskNetWait = Duration(seconds: 20);
+
+  @override
   DateTime? get _taskNoteDate {
     final key = _loadedKey;
     return _docIsDay && key != null ? parseDayKey(key) : null;
@@ -1871,6 +2222,11 @@ class _CalendarPageState extends State<CalendarPage>
     final step = taskStep(from.state, control);
     final group = taskGroupAt(opsToLines(doc.toDelta().toJson()), li);
     if (group == null) return;
+    // перенос и отмена переноса — транзакции, без сети не работают
+    if (taskStepNeedsNetwork(step) && _offline) {
+      _showTaskPopup(kTaskNeedNetwork, at);
+      return;
+    }
 
     // ✓ / снять ✓ — просто смена состояния (обычное сохранение)
     if (!step.carry && !step.uncarry) {
@@ -1892,8 +2248,9 @@ class _CalendarPageState extends State<CalendarPage>
       if (step.uncarry) {
         final targetKey = from.target!;
         final label = formatTaskDate(parseDayKey(targetKey)!);
-        final out = await _taskCarrier.uncarry(
-            targetKey: targetKey, group: group, label: label);
+        final out = await _taskCarrier
+            .uncarry(targetKey: targetKey, group: group, label: label)
+            .timeout(_taskNetWait);
         if (out == UncarryOutcome.removed) _searchCache.invalidate();
         if (out == UncarryOutcome.modified) {
           message = 'Задача на $label уже изменена и оставлена там';
@@ -1916,7 +2273,7 @@ class _CalendarPageState extends State<CalendarPage>
               Map<String, dynamic>.from(op as Map),
           ], accent),
           label: label,
-        );
+        ).timeout(_taskNetWait);
         _searchCache.invalidate();
         next = TaskValue.carried(targetKey);
         message = carriedLabel(noteDate, target);
@@ -2121,12 +2478,11 @@ class _CalendarPageState extends State<CalendarPage>
   /// дождаться сохранения и сохранить текущие правки)
   Future<void> _openTopic(String id) async {
     if (_backupBusy) return;
-    while (_saving || _taskBusy) {
+    while (_taskBusy) {
       await Future.delayed(const Duration(milliseconds: 100));
     }
-    if (_loadedKey == _targetKey && _isDirty) {
-      await _saveNote();
-    }
+    // как при смене дня: запись в очереди сразу, сервер не ждём
+    if (_loadedKey == _targetKey && _isDirty) unawaited(_saveNote());
     if (!mounted) return;
     setState(() => _openTopicId = id);
     _status.value = '';
@@ -2171,10 +2527,9 @@ class _CalendarPageState extends State<CalendarPage>
       _status.value = '';
       _loadNote(_selectedDay);
     }
-    // уже идущее сохранение пусть завершится до удаления
-    while (_saving) {
-      await Future.delayed(const Duration(milliseconds: 100));
-    }
+    // записи уходят на сервер по порядку: сохранение темы (если было) —
+    // раньше удаления; её отклонённый текст больше не нужен
+    _saves.forget(topicKey(id));
     if (!mounted) return;
     try {
       await _topics.delete(id);
@@ -2542,6 +2897,12 @@ class _CalendarPageState extends State<CalendarPage>
             child: _toolbar(),
           ),
           const SizedBox(height: 12),
+          ValueListenableBuilder<bool>(
+            valueListenable: _unknownDay,
+            builder: (context, unknown, _) => unknown && _openTopicId == null
+                ? const _UnknownDayBanner()
+                : const SizedBox.shrink(),
+          ),
           Expanded(
             child: Container(
               padding: const EdgeInsets.all(14),
@@ -2597,19 +2958,7 @@ class _CalendarPageState extends State<CalendarPage>
           const SizedBox(height: 8),
           Align(
             alignment: Alignment.centerRight,
-            child: ValueListenableBuilder<String>(
-              valueListenable: _status,
-              builder: (context, status, _) {
-                Color color = kTextSecondary;
-                if (status == 'Сохранено ✓') color = kAccent;
-                if (status.startsWith('Ошибка') ||
-                    status.startsWith('Не удалось')) {
-                  color = const Color(0xFFFF5C5C);
-                }
-                return Text(status,
-                    style: TextStyle(color: color, fontSize: 13));
-              },
-            ),
+            child: _statusRow(),
           ),
         ],
       ),
@@ -2720,6 +3069,67 @@ class TodayButton extends StatelessWidget {
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Значок «Офлайн» рядом со статусом сохранения
+class _OfflineChip extends StatelessWidget {
+  const _OfflineChip();
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'Нет связи с сервером. Правки сохраняются на устройстве и '
+          'уйдут сами, когда сеть вернётся.',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: kCard,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: kDivider),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.cloud_off_outlined, size: 13, color: kAccentLight),
+            SizedBox(width: 5),
+            Text(kOfflineChip,
+                style: TextStyle(color: kAccentLight, fontSize: 12)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Предупреждение над редактором: этого дня нет на устройстве
+class _UnknownDayBanner extends StatelessWidget {
+  const _UnknownDayBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        decoration: BoxDecoration(
+          color: const Color(0x1AFFD54A),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: const Color(0x66FFD54A)),
+        ),
+        child: const Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.info_outline, size: 17, color: Color(0xFFFFD54A)),
+            SizedBox(width: 9),
+            Expanded(
+              child: Text(kUnknownDayWarning,
+                  style: TextStyle(color: kTextPrimary, fontSize: 13)),
+            ),
+          ],
         ),
       ),
     );

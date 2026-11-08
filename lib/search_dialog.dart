@@ -19,6 +19,7 @@ import 'main.dart'
         kTextPrimary,
         kTextSecondary,
         kWeekdaysShort;
+import 'offline.dart' show kSearchLocalHint;
 import 'search.dart';
 import 'topics.dart' show Topic, topicIdOf, topicKey;
 
@@ -133,6 +134,7 @@ Future<SearchPick?> showNoteSearch(
   required String Function() liveText,
   required bool Function(String key) inCalendarRange,
   List<Topic> Function()? topics,
+  bool Function()? localCopy,
 }) {
   return showDialog<SearchPick>(
     context: context,
@@ -144,6 +146,7 @@ Future<SearchPick?> showNoteSearch(
       liveText: liveText,
       inCalendarRange: inCalendarRange,
       topics: topics,
+      localCopy: localCopy,
     ),
   );
 }
@@ -157,6 +160,7 @@ class NoteSearchDialog extends StatefulWidget {
     required this.liveText,
     required this.inCalendarRange,
     this.topics,
+    this.localCopy,
   });
 
   final NoteSearchCache cache;
@@ -169,6 +173,9 @@ class NoteSearchDialog extends StatefulWidget {
 
   /// Текущий список тем (названия, время изменения)
   final List<Topic> Function()? topics;
+
+  /// Заметки взяты из локальной копии (нет связи) — показать подсказку
+  final bool Function()? localCopy;
 
   @override
   State<NoteSearchDialog> createState() => _NoteSearchDialogState();
@@ -353,6 +360,13 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
   String _statusText() {
     if (_loading) return 'Загрузка заметок…';
     if (_error != null) return '';
+    final text = _resultText();
+    return widget.localCopy?.call() ?? false
+        ? '$text · $kSearchLocalHint'
+        : text;
+  }
+
+  String _resultText() {
     final q = _applied;
     final topics = widget.topics?.call().length ?? 0;
     if (q.trim().isEmpty) {

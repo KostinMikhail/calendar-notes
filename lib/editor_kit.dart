@@ -221,6 +221,12 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
   /// Нажатие ✗ / ✓ (заметки дня); [anchor] — где нажали (для окошка)
   void _onTaskControl(Line line, TaskControl control, BuildContext anchor) {}
 
+  /// Сигнал «связь появилась/пропала» (✗ без связи недоступен)
+  Listenable? get _taskNetwork => null;
+
+  /// Сейчас нет связи
+  bool get _taskOffline => false;
+
   /// Строка, у которой сейчас идёт перенос (✗ показывает ожидание)
   final ValueNotifier<Line?> _taskBusyLine = ValueNotifier<Line?>(null);
 
@@ -310,12 +316,16 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
     if (_taskMode == TaskMode.inert) {
       return const TaskControls(value: TaskValue.open, inert: true);
     }
-    return ValueListenableBuilder<Line?>(
-      valueListenable: _taskBusyLine,
-      builder: (context, busy, _) => TaskControls(
+    final network = _taskNetwork;
+    return ListenableBuilder(
+      listenable: network == null
+          ? _taskBusyLine
+          : Listenable.merge([_taskBusyLine, network]),
+      builder: (context, _) => TaskControls(
         value: info.value,
-        busy: identical(busy, node),
+        busy: identical(_taskBusyLine.value, node),
         crossTooltip: _crossTooltip(info.value),
+        crossDisabled: _taskOffline,
         onCross: () => _onTaskControl(node, TaskControl.cross, context),
         onCheck: () => _onTaskControl(node, TaskControl.check, context),
       ),

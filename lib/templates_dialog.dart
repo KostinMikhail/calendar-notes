@@ -173,7 +173,10 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
       await widget.store.save(settings);
       _saved = Map.of(_custom);
       widget.onSaved(settings);
-      if (mounted) setState(() => _status = 'Сохранено ✓');
+      if (mounted) {
+        setState(() => _status =
+            widget.store.lastSaveQueued ? kStatusQueued : kStatusSaved);
+      }
     } catch (e) {
       if (mounted) {
         setState(() => _status = 'Ошибка сохранения: ${describeError(e)}');

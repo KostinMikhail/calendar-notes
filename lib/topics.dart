@@ -14,6 +14,8 @@ import 'dart:math' as math;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
+import 'offline.dart';
+
 const String kTopicDefaultTitle = 'Новая тема';
 const String kTopicUntitled = 'Без названия';
 const int kTopicTitleMax = 80;
@@ -239,12 +241,25 @@ class TopicsController extends ChangeNotifier {
 /// Хранилище на Firestore. [ref] возвращает коллекцию тем вошедшего
 /// пользователя или null (нет входа) — тогда операции не выполняются.
 class FirestoreTopicStore implements TopicStore {
-  FirestoreTopicStore(this.ref);
+  FirestoreTopicStore(this.ref, {this.offline, this.onLateError});
 
   final CollectionReference<Map<String, dynamic>>? Function() ref;
 
-  static const _timeout = Duration(seconds: 30);
+  /// Сейчас нет связи (тогда читаем из локальной копии)
+  final bool Function()? offline;
+
+  /// Запись, ушедшая в очередь без связи, позже отклонена сервером
+  final void Function(String what, Object error)? onLateError;
+
+  static const _listWait = Duration(seconds: 10);
   static const int _maxBatch = 400;
+
+  bool get _offline => offline?.call() ?? false;
+
+  /// Запись не ждёт сервер дольше пары секунд: без связи она уже в
+  /// очереди на устройстве и уйдёт, когда связь вернётся
+  Future<void> _write(Future<void> write, String what) =>
+      waitAck(write, onLateError: (e) => onLateError?.call(what, e));
 
   CollectionReference<Map<String, dynamic>> get _col {
     final c = ref();
@@ -256,7 +271,8 @@ class FirestoreTopicStore implements TopicStore {
 
   @override
   Future<List<Topic>> list() async {
-    final snap = await _col.get().timeout(_timeout);
+    final snap =
+        (await readQuery(_col, offline: _offline, timeout: _listWait)).value;
     return [
       for (final d in snap.docs)
         Topic(
@@ -273,25 +289,30 @@ class FirestoreTopicStore implements TopicStore {
   @override
   Future<String> create(String title, int order) async {
     final doc = _col.doc();
-    await doc.set({
-      'title': title,
-      'delta': kEmptyTopicDelta,
-      'text': '',
-      'order': order,
-      'createdAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    }).timeout(_timeout);
+    await _write(
+        doc.set({
+          'title': title,
+          'delta': kEmptyTopicDelta,
+          'text': '',
+          'order': order,
+          'createdAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        }),
+        'Тема не создана');
     return doc.id;
   }
 
   @override
-  Future<void> rename(String id, String title) => _col.doc(id).update({
+  Future<void> rename(String id, String title) => _write(
+      _col.doc(id).update({
         'title': title,
         'updatedAt': FieldValue.serverTimestamp(),
-      }).timeout(_timeout);
+      }),
+      'Тема не переименована');
 
   @override
-  Future<void> delete(String id) => _col.doc(id).delete().timeout(_timeout);
+  Future<void> delete(String id) =>
+      _write(_col.doc(id).delete(), 'Тема не удалена');
 
   @override
   Future<void> setOrders(Map<String, int> orders) async {
@@ -303,14 +324,24 @@ class FirestoreTopicStore implements TopicStore {
         // только order: правила разрешают такое изменение без updatedAt
         batch.update(col.doc(e.key), {'order': e.value});
       }
-      await batch.commit().timeout(_timeout);
+      await _write(batch.commit(), 'Порядок тем не сохранён');
     }
   }
 
   @override
   Future<TopicContent?> load(String id) async {
-    final snap = await _col.doc(id).get();
-    if (!snap.exists) return null;
+    final r = await readDoc(_col.doc(id), offline: _offline);
+    final snap = r.value;
+    if (snap == null || !snap.exists) {
+      // без связи «нет в локальной копии» не значит «тему удалили»
+      if (r.fromCache) {
+        throw FirebaseException(
+            plugin: 'cloud_firestore',
+            code: 'unavailable',
+            message: 'Темы нет на устройстве');
+      }
+      return null;
+    }
     final d = snap.data()!;
     return TopicContent(
       d['delta'] is String ? d['delta'] as String : '',
