@@ -98,8 +98,14 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
         if (_handleBackspace()) return KeyEventResult.handled;
       }
       if (logical == LogicalKeyboardKey.delete && !shift) {
-        // Delete в конце строки перед разделителем не должен «съедать» его
+        // Delete в конце строки перед разделителем убирает только
+        // разделитель (строки не склеиваются)
         final sel = _ec.selection;
+        final d = dividerBelowCaret(_ec.document.toDelta().toJson(), sel);
+        if (d != null) {
+          _removeDivider(d, sel.baseOffset);
+          return KeyEventResult.handled;
+        }
         if (sel.isCollapsed &&
             _dividerOffsets().contains(sel.baseOffset + 1)) {
           return KeyEventResult.handled;
@@ -139,6 +145,10 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
     if (d >= 0 && _dividerOffsets().contains(d)) {
       if (isList) {
         _ec.formatSelection(Attribute.clone(Attribute.list, null));
+      } else if (dividerAboveCaret(_ec.document.toDelta().toJson(), sel) ==
+          d) {
+        // строка без оформления — убрать разделитель над ней
+        _removeDivider(d, d);
       } else {
         _snapping = true;
         try {
@@ -156,6 +166,13 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
   }
 
   // ---------- разделители (неактивные плашки) ----------
+
+  /// Убрать разделитель в позиции [d] (с его строкой); курсор — в [caret].
+  /// Одно изменение — один шаг Ctrl+Z.
+  void _removeDivider(int d, int caret) {
+    _ec.compose(removeDividerDelta(d), TextSelection.collapsed(offset: caret),
+        ChangeSource.local);
+  }
 
   /// Вставить разделитель отдельной строкой на месте курсора
   /// (Ctrl+Shift+«минус»). Одно изменение — один шаг Ctrl+Z.
@@ -264,6 +281,9 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
     final fix = sanitizeTasks(doc, change, _taskMode,
         fromPaste: until != null && DateTime.now().isBefore(until));
     if (fix != null) _composeQuiet(fix);
+    // разделитель — всегда отдельная строка без оформления (вставка,
+    // отмена, повтор); без шага в истории Ctrl+Z
+    fixDividerLines(_ec);
   }
 
   /// Правка без шага в истории Ctrl+Z
@@ -408,6 +428,7 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
   /// Разделитель нельзя выделить и нельзя поставить на него курсор:
   /// если выделение попало на него, оно сдвигается на соседнюю строку.
   void _snapSelectionOffDividers() {
+    _watchTaskDoc(); // следим за документом (и в редакторах без задач)
     final sel = _ec.selection;
     if (!sel.isValid) return;
     final divs = _dividerOffsets();

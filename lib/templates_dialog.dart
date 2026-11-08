@@ -43,7 +43,8 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
     ),
   };
 
-  final QuillController _tc = QuillController.basic();
+  final QuillController _tc =
+      QuillController.basic(config: kEditorControllerConfig);
   final FocusNode _tf = FocusNode();
   final ScrollController _scroll = ScrollController();
 
@@ -111,7 +112,7 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
     final json = _custom[key] ?? _defaultJson(key);
     Document doc;
     try {
-      doc = Document.fromJson(jsonDecode(json) as List);
+      doc = dividerSafeDocument(jsonDecode(json));
     } catch (_) {
       doc = Document();
     }

@@ -17,6 +17,7 @@ import 'package:table_calendar/table_calendar.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'backup.dart';
+import 'dividers.dart';
 import 'firebase_options.dart';
 import 'offline.dart';
 import 'search.dart' show findInText, kObjectReplacement;
@@ -211,6 +212,10 @@ class DividerEmbedBuilder extends EmbedBuilder {
   @override
   String get key => 'divider';
 
+  /// В буфере обмена (текст) — ничего, а не символ-заглушка U+FFFC
+  @override
+  String toPlainText(Embed node) => kDividerPlainText;
+
   @override
   Widget build(BuildContext context, EmbedContext embedContext) {
     return MouseRegion(
@@ -345,7 +350,7 @@ String _pickAccent() =>
   if (c.ops.isEmpty) return (Document(), c.accent);
   // пункты блока «Задачи на день» — открытые задачи с кнопками ✗/✓
   final ops = linesToOps(markTaskSection(opsToLines(c.ops)));
-  return (Document.fromJson(ops), c.accent);
+  return (dividerSafeDocument(ops), c.accent);
 }
 
 /// Стандартный шаблон дня (без пользовательских настроек)
@@ -900,7 +905,7 @@ class _CalendarPageState extends State<CalendarPage>
   @override
   void initState() {
     super.initState();
-    _controller = QuillController.basic();
+    _controller = QuillController.basic(config: kEditorControllerConfig);
     _editorFocus = FocusNode();
     HardwareKeyboard.instance.addHandler(_onGlobalKey);
     WidgetsBinding.instance.addObserver(this);
@@ -1652,7 +1657,7 @@ class _CalendarPageState extends State<CalendarPage>
 
     if (delta is String && delta.isNotEmpty) {
       try {
-        document = Document.fromJson(jsonDecode(delta));
+        document = dividerSafeDocument(jsonDecode(delta));
       } catch (_) {
         document = Document()..insert(0, text);
       }
@@ -1674,7 +1679,7 @@ class _CalendarPageState extends State<CalendarPage>
     final rejected = _saves.rejected(key);
     if (rejected != null) {
       try {
-        document = Document.fromJson(jsonDecode(rejected.payload.json));
+        document = dividerSafeDocument(jsonDecode(rejected.payload.json));
       } catch (_) {}
       final a = rejected.payload.accent;
       if (a != null && a.isNotEmpty) accent = a;
@@ -1776,7 +1781,7 @@ class _CalendarPageState extends State<CalendarPage>
     Document document;
     if (content.delta.isNotEmpty) {
       try {
-        document = Document.fromJson(jsonDecode(content.delta));
+        document = dividerSafeDocument(jsonDecode(content.delta));
       } catch (_) {
         document = Document()..insert(0, content.text);
       }
@@ -1787,7 +1792,7 @@ class _CalendarPageState extends State<CalendarPage>
     final rejected = _saves.rejected(key);
     if (rejected != null) {
       try {
-        document = Document.fromJson(jsonDecode(rejected.payload.json));
+        document = dividerSafeDocument(jsonDecode(rejected.payload.json));
       } catch (_) {}
     }
 
@@ -2109,8 +2114,11 @@ class _CalendarPageState extends State<CalendarPage>
     // быть откатом — он не должен стереть текст в редакторе
     if (_saves.isUnsettled(key)) return;
     final data = snap.data();
-    final remoteJson = data?['delta'];
-    if (data == null || remoteJson is! String || remoteJson.isEmpty) return;
+    final rawJson = data?['delta'];
+    if (data == null || rawJson is! String || rawJson.isEmpty) return;
+    // строки разделителей — как после загрузки в редактор (иначе старая
+    // испорченная заметка в базе выглядела бы «чужим изменением»)
+    final remoteJson = normalizeDividerJson(rawJson);
     if (remoteJson == _lastSavedJson) return;
     if (remoteJson == _currentJson()) {
       _lastSavedJson = remoteJson;
@@ -2137,7 +2145,7 @@ class _CalendarPageState extends State<CalendarPage>
       }
       // своих правок нет — просто показываем то, что в базе
       try {
-        final doc = Document.fromJson(jsonDecode(remoteJson) as List);
+        final doc = dividerSafeDocument(jsonDecode(remoteJson));
         final sel = _controller.selection;
         _controller.document = doc;
         _controller.updateSelection(
