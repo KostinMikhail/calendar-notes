@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:calendar_notes/backup.dart';
+import 'package:calendar_notes/main.dart' show kSurface;
 import 'package:calendar_notes/format_menu.dart' show PrefStore;
 import 'package:calendar_notes/spell/personal_dictionary.dart';
 import 'package:calendar_notes/spell/spell_backend.dart';
@@ -646,6 +647,11 @@ void main() {
       expect(engine.dictionary.contains('кострома'), isTrue);
       expect(hits(), isEmpty);
       expect(find.text('Добавлено в словарь'), findsOneWidget);
+      // небольшое тёмное плавающее окошко, а не белая полоса во всю ширину
+      final snack = tester.widget<SnackBar>(find.byType(SnackBar));
+      expect(snack.behavior, SnackBarBehavior.floating);
+      expect(snack.backgroundColor, kSurface);
+      expect(snack.width, lessThanOrEqualTo(320));
       // «Отменить» в уведомлении (вызываем его действие)
       tester.widget<SnackBarAction>(find.byType(SnackBarAction)).onPressed();
       await settle(tester);

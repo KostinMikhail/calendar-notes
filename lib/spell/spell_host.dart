@@ -458,11 +458,25 @@ class SpellCheckHostState extends State<SpellCheckHost> {
     final word = hit.token.word;
     engine.dictionary.add(word);
     widget.focusNode.requestFocus();
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
-      duration: const Duration(seconds: 4),
-      content: const Text('Добавлено в словарь'),
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    messenger?.hideCurrentSnackBar();
+    // небольшое тёмное окошко внизу, в цветах приложения
+    messenger?.showSnackBar(SnackBar(
+      duration: const Duration(seconds: 3),
+      behavior: SnackBarBehavior.floating,
+      width: 300,
+      elevation: 3,
+      backgroundColor: kSurface,
+      padding: const EdgeInsets.only(left: 14, right: 4),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: const BorderSide(color: kDivider),
+      ),
+      content: const Text('Добавлено в словарь',
+          style: TextStyle(color: kTextPrimary, fontSize: 13)),
       action: SnackBarAction(
         label: 'Отменить',
+        textColor: kAccent,
         onPressed: () => engine.dictionary.remove(word),
       ),
     ));

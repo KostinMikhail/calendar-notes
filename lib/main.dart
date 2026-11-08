@@ -2800,7 +2800,14 @@ class _CalendarPageState extends State<CalendarPage>
       startingDayOfWeek: StartingDayOfWeek.monday,
       rowHeight: 40,
       daysOfWeekHeight: 24,
-      selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
+      // открыта тема — приглушённо отмечен сегодняшний день (день, с
+      // которого перешли, не отмечается; _selectedDay при этом не меняется)
+      selectedDayPredicate: (day) => isSameDay(
+          calendarHighlightDay(
+              selected: _selectedDay,
+              topicOpen: _openTopicId != null,
+              now: DateTime.now()),
+          day),
       onDaySelected: _onDaySelected,
       onPageChanged: (d) => setState(() => _focusedDay = d),
       // клик по названию месяца — показать все месяцы года
@@ -3139,11 +3146,20 @@ const CalendarStyle kCalendarStyle = CalendarStyle(
   selectedDecoration: BoxDecoration(color: kAccent, shape: BoxShape.circle),
 );
 
-/// Заливка выбранного дня, пока открыта тема: тот же цвет, что у яркого
+/// Заливка сегодняшнего дня, пока открыта тема: тот же цвет, что у яркого
 /// выделения, но на 40 %
 const Color kMutedSelection = Color(0x669C8FCB);
 
-/// Ячейка выбранного дня: открыта тема — приглушённая заливка (свой
+/// Какой день отмечен в календаре: открыт день — он сам (ярко); открыта
+/// тема — сегодняшний (приглушённо), а не тот, с которого перешли
+DateTime calendarHighlightDay({
+  required DateTime selected,
+  required bool topicOpen,
+  required DateTime now,
+}) =>
+    topicOpen ? now : selected;
+
+/// Ячейка отмеченного дня: открыта тема — приглушённая заливка (свой
 /// виджет, без анимации — без кадра яркого круга); открыт день — null,
 /// обычное яркое выделение календаря
 FocusedDayBuilder? selectedDayBuilder({
@@ -3155,8 +3171,8 @@ FocusedDayBuilder? selectedDayBuilder({
       MutedSelectedDay(day: day, isToday: isSameDay(day, now()));
 }
 
-/// Выбранный день, пока открыта тема. Сегодняшний день сохраняет свою
-/// отметку (сиреневый жирный номер) поверх заливки.
+/// Отмеченный день, пока открыта тема (сегодняшний): приглушённая заливка,
+/// поверх — отметка сегодняшнего дня (сиреневый жирный номер).
 class MutedSelectedDay extends StatelessWidget {
   const MutedSelectedDay({super.key, required this.day, required this.isToday});
 
