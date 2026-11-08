@@ -11,6 +11,12 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
   /// Ключ редактора: через него плавающее меню находит выделение на экране
   final GlobalKey<EditorState> _quillKey = GlobalKey<EditorState>();
 
+  /// Проверка правописания (null — нет)
+  SpellEngine? get _spellEngine => null;
+
+  /// Открыто меню вариантов правописания
+  final ValueNotifier<bool> _spellMenuOpen = ValueNotifier<bool>(false);
+
   // --- разделители: курсор не должен на них попадать ---
   int? _prevCaret;
   bool _snapping = false;
@@ -632,6 +638,7 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
     _linkMenuTimer?.cancel();
     _taskDocSub?.cancel();
     _taskBusyLine.dispose();
+    _spellMenuOpen.dispose();
     super.dispose();
   }
 
@@ -892,13 +899,24 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
   // ---------- элементы интерфейса ----------
 
   /// Редактор с плавающим меню над выделением (жирный, зачёркнутый, цвет)
+  /// и проверкой правописания (серые подчёркивания, варианты по правому
+  /// щелчку)
   Widget _withFormatMenu(QuillEditor editor, ScrollController scroll) =>
-      FormatMenuHost(
+      SpellCheckHost(
         controller: _ec,
         focusNode: _ef,
         editorKey: _quillKey,
+        engine: _spellEngine,
+        menuOpen: _spellMenuOpen,
         scrollController: scroll,
-        child: editor,
+        child: FormatMenuHost(
+          controller: _ec,
+          focusNode: _ef,
+          editorKey: _quillKey,
+          scrollController: scroll,
+          suppressed: _spellMenuOpen,
+          child: editor,
+        ),
       );
 
   Widget _toolButton({

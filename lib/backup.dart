@@ -18,9 +18,14 @@ import 'topics.dart' show topicKey;
 
 const String kBackupFormat = 'calendar-notes-backup';
 
-/// 1 — только заметки дней; 2 — плюс необязательный раздел topics.
-/// Файлы версии 1 читаются как раньше.
-const int kBackupVersion = 2;
+/// 1 — только заметки дней; 2 — плюс необязательный раздел topics;
+/// 3 — плюс необязательный раздел dictionary (личный словарь).
+/// Файлы версий 1 и 2 читаются как раньше.
+const int kBackupVersion = 3;
+
+/// Ограничения личного словаря (как в firestore.rules)
+const int kMaxBackupDictionaryWords = 5000;
+const int kMaxBackupDictionaryWordLength = 64;
 
 const int kMaxTopicTitleLength = 80;
 final RegExp _topicIdRe = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
@@ -110,6 +115,7 @@ class BackupData {
     required this.to,
     required this.notes,
     this.topics = const [],
+    this.dictionary = const [],
   });
 
   final DateTime createdAt; // UTC
@@ -119,6 +125,10 @@ class BackupData {
 
   /// Темы (только в файлах версии 2 и новее)
   final List<BackupTopic> topics;
+
+  /// Личный словарь (только в файлах версии 3 и новее); восстанавливается
+  /// объединением со словами, которые уже есть
+  final List<String> dictionary;
 }
 
 /// Тема в копии (users/{uid}/topics/{id})
@@ -253,6 +263,7 @@ String encodeBackup(
   required DateTime today,
   required DateTime createdAtUtc,
   List<BackupTopic> topics = const [],
+  List<String> dictionary = const [],
 }) {
   final doc = {
     'format': kBackupFormat,
@@ -264,6 +275,7 @@ String encodeBackup(
     },
     'notes': [for (final n in notes) n.toJson()],
     'topics': [for (final t in topics) t.toJson()],
+    if (dictionary.isNotEmpty) 'dictionary': dictionary,
   };
   return const JsonEncoder.withIndent('  ').convert(doc);
 }
@@ -367,6 +379,8 @@ BackupData parseBackup(String source, {required DateTime today}) {
         'format', 'version', 'createdAt', 'dateRange', 'notes',
         // раздел тем появился в версии 2; в файлах версии 1 его быть не может
         if (version >= 2) 'topics',
+        // личный словарь — с версии 3
+        if (version >= 3) 'dictionary',
       },
       where);
 
@@ -474,12 +488,41 @@ BackupData parseBackup(String source, {required DateTime today}) {
     topics.sort((a, b) =>
         a.order != b.order ? a.order.compareTo(b.order) : a.id.compareTo(b.id));
   }
+  final dictionary = _parseDictionary(root['dictionary'], where);
   return BackupData(
       createdAt: createdAt.toUtc(),
       from: from,
       to: to,
       notes: notes,
-      topics: topics);
+      topics: topics,
+      dictionary: dictionary);
+}
+
+/// Раздел «dictionary»: список слов. Слова — в нижнем регистре, без повторов.
+List<String> _parseDictionary(Object? raw, String where) {
+  if (raw == null) return const [];
+  if (raw is! List) {
+    throw BackupException('$where: поле «dictionary» неверного типа');
+  }
+  if (raw.length > kMaxBackupDictionaryWords) {
+    throw BackupException('Личный словарь: больше '
+        '$kMaxBackupDictionaryWords слов');
+  }
+  final out = <String>{};
+  for (var i = 0; i < raw.length; i++) {
+    final w = raw[i];
+    if (w is! String) {
+      throw BackupException('Личный словарь: слово №${i + 1} — не строка');
+    }
+    final n = w.trim().toLowerCase().replaceAll('ё', 'е');
+    if (n.isEmpty ||
+        n.length > kMaxBackupDictionaryWordLength ||
+        n.contains(RegExp(r'\s'))) {
+      throw BackupException('Личный словарь: неверное слово №${i + 1}');
+    }
+    out.add(n);
+  }
+  return out.toList()..sort();
 }
 
 // ============================================================

@@ -7,6 +7,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 
@@ -213,6 +214,7 @@ class FormatMenuHost extends StatefulWidget {
     required this.editorKey,
     required this.child,
     this.scrollController,
+    this.suppressed,
   });
 
   final QuillController controller;
@@ -220,6 +222,9 @@ class FormatMenuHost extends StatefulWidget {
   final GlobalKey<EditorState> editorKey;
   final ScrollController? scrollController;
   final Widget child;
+
+  /// true — меню не показывать (открыто меню вариантов правописания)
+  final ValueListenable<bool>? suppressed;
 
   @override
   State<FormatMenuHost> createState() => _FormatMenuHostState();
@@ -254,12 +259,22 @@ class _FormatMenuHostState extends State<FormatMenuHost>
     _c.addListener(_onControllerChanged);
     widget.focusNode.addListener(_onFocusChanged);
     widget.scrollController?.addListener(_onScroll);
+    widget.suppressed?.addListener(_onSuppressed);
   }
 
   void _unsubscribe(FormatMenuHost w) {
     w.controller.removeListener(_onControllerChanged);
     w.focusNode.removeListener(_onFocusChanged);
     w.scrollController?.removeListener(_onScroll);
+    w.suppressed?.removeListener(_onSuppressed);
+  }
+
+  void _onSuppressed() {
+    if (widget.suppressed?.value ?? false) {
+      _hide();
+    } else {
+      _schedule();
+    }
   }
 
   @override
@@ -267,7 +282,8 @@ class _FormatMenuHostState extends State<FormatMenuHost>
     super.didUpdateWidget(old);
     if (old.controller != widget.controller ||
         old.focusNode != widget.focusNode ||
-        old.scrollController != widget.scrollController) {
+        old.scrollController != widget.scrollController ||
+        old.suppressed != widget.suppressed) {
       _unsubscribe(old);
       _subscribe();
       _hide();
@@ -342,6 +358,7 @@ class _FormatMenuHostState extends State<FormatMenuHost>
         sel.isCollapsed ||
         !widget.focusNode.hasFocus ||
         _outside.isNotEmpty ||
+        (widget.suppressed?.value ?? false) ||
         !routeOk) {
       _hide();
       return;

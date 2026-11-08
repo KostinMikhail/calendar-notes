@@ -20,6 +20,11 @@ import 'backup.dart';
 import 'dividers.dart';
 import 'firebase_options.dart';
 import 'format_menu.dart';
+import 'spell/dictionary_dialog.dart';
+import 'spell/personal_dictionary.dart';
+import 'spell/spell_backend.dart';
+import 'spell/spell_engine.dart';
+import 'spell/spell_host.dart';
 import 'offline.dart';
 import 'search.dart' show findInText, kObjectReplacement;
 import 'search_dialog.dart';
@@ -824,6 +829,19 @@ class _CalendarPageState extends State<CalendarPage>
 
   bool _calendarVisible = true;
 
+  /// Проверка правописания (словари грузятся в фоне после входа)
+  late final SpellEngine _spell = SpellEngine(
+    backend: createSpellBackend(),
+    dictionary: PersonalDictionary(
+      FirestoreDictionaryStore(() => _dictionaryRef,
+          offline: () => _offline, onLateError: _onDictionaryLateError),
+      onError: _onDictionaryError,
+    ),
+  );
+
+  @override
+  SpellEngine? get _spellEngine => _spell;
+
   /// Панель форматирования над заметкой (запоминается на этом устройстве)
   static const _toolbarPref = ToolbarVisibilityPref();
   bool _toolbarVisible = _toolbarPref.load();
@@ -930,6 +948,9 @@ class _CalendarPageState extends State<CalendarPage>
     _watchConnection();
     // копия всех заметок на устройство — в фоне, после открытия первого дня
     _downloadStart = Timer(const Duration(seconds: 3), _download.run);
+    // словари правописания — тоже в фоне (если проверка включена)
+    _spell.onFailed = _onSpellFailed;
+    _spell.start();
     _templatesLoading = _loadTemplateSettings();
     _loadNote(_selectedDay);
     _topics.load();
@@ -947,6 +968,7 @@ class _CalendarPageState extends State<CalendarPage>
     _saves.dispose();
     _conn.dispose();
     _unknownDay.dispose();
+    _spell.dispose();
     setLeaveGuard(false);
     HardwareKeyboard.instance.removeHandler(_onGlobalKey);
     WidgetsBinding.instance.removeObserver(this);
@@ -1008,6 +1030,12 @@ class _CalendarPageState extends State<CalendarPage>
           case 'templates':
             _openTemplates();
             break;
+          case 'spell':
+            setState(() => _spell.setEnabled(!_spell.enabled));
+            break;
+          case 'dictionary':
+            showPersonalDictionaryDialog(context, _spell.dictionary);
+            break;
           case 'logout':
             _signOut();
             break;
@@ -1038,6 +1066,14 @@ class _CalendarPageState extends State<CalendarPage>
         else
           item('restore', Icons.upload_outlined, 'Восстановить из копии'),
         item('templates', Icons.view_agenda_outlined, 'Шаблоны'),
+        CheckedPopupMenuItem<String>(
+          value: 'spell',
+          height: 40,
+          checked: _spell.enabled,
+          child: const Text('Проверка правописания',
+              style: TextStyle(color: kTextPrimary)),
+        ),
+        item('dictionary', Icons.spellcheck, 'Личный словарь'),
         const PopupMenuDivider(),
         const PopupMenuItem<String>(
           value: 'logout',
@@ -1168,7 +1204,10 @@ class _CalendarPageState extends State<CalendarPage>
         return;
       }
 
-      if (list.isEmpty && topicList.isEmpty) {
+      // личный словарь — тоже в копию (свежий из базы, иначе — из памяти)
+      final dictionaryWords = await _spell.dictionary.exportWords();
+
+      if (list.isEmpty && topicList.isEmpty && dictionaryWords.isEmpty) {
         await _showMessage('Нет заметок',
             'За период $period нет сохранённых заметок, тем тоже нет. '
                 'Файл не создан.');
@@ -1178,6 +1217,7 @@ class _CalendarPageState extends State<CalendarPage>
       final name = backupFileName(today);
       final json = encodeBackup(list,
           topics: topicList,
+          dictionary: dictionaryWords,
           today: today,
           createdAtUtc: DateTime.now().toUtc());
       Uri? saved;
@@ -1203,6 +1243,7 @@ class _CalendarPageState extends State<CalendarPage>
           'Файл: $name\n'
               'Заметок: ${list.length}\n'
               'Тем: ${topicList.length}\n'
+              '${dictionaryWords.isEmpty ? '' : 'Слов в личном словаре: ${dictionaryWords.length}\n'}'
               'Период: $period'
               '${fromDevice ? _deviceCopyNote() : ''}');
     } finally {
@@ -1225,12 +1266,14 @@ class _CalendarPageState extends State<CalendarPage>
             'Период: ${formatRuDate(data.from)} — ${formatRuDate(data.to)}\n'
             'Заметок в копии: ${data.notes.length}\n'
             '${data.topics.isEmpty ? '' : 'Тем в копии: ${data.topics.length}\n'}'
+            '${data.dictionary.isEmpty ? '' : 'Слов личного словаря в копии: ${data.dictionary.length}\n'}'
             '\n'
             'Способ: перезапись.\n'
             '• Заметки за те же даты будут заменены версиями из копии.\n'
             '• Заметки, которых нет в копии, останутся как есть.\n'
             '• Заметки вне периода копии не изменятся.\n'
             '${data.topics.isEmpty ? '' : '• Темы из копии заменят темы с тем же идентификатором или будут созданы; остальные темы не изменятся.\n'}'
+            '${data.dictionary.isEmpty ? '' : '• Слова из копии добавятся в личный словарь; ваши слова останутся.\n'}'
             '• Шаблоны по дням недели не изменятся.',
             style: const TextStyle(color: kTextPrimary, height: 1.4),
           ),
@@ -1323,7 +1366,9 @@ class _CalendarPageState extends State<CalendarPage>
             error: true);
         return;
       }
-      if (data.notes.isEmpty && data.topics.isEmpty) {
+      if (data.notes.isEmpty &&
+          data.topics.isEmpty &&
+          data.dictionary.isEmpty) {
         await _showMessage('Восстанавливать нечего',
             'В резервной копии нет заметок. Ничего не изменено.');
         return;
@@ -1394,12 +1439,27 @@ class _CalendarPageState extends State<CalendarPage>
         },
       );
 
-      final result = await runRestore(
-        FirestoreNoteStore(notes, topics: _topicsRef),
-        data.notes,
-        topics: data.topics,
-        onProgress: (done, total) => progress.value = (done, total),
-      );
+      final result = data.notes.isEmpty && data.topics.isEmpty
+          ? const RestoreResult(ok: true, total: 0, written: 0)
+          : await runRestore(
+              FirestoreNoteStore(notes, topics: _topicsRef),
+              data.notes,
+              topics: data.topics,
+              onProgress: (done, total) => progress.value = (done, total),
+            );
+
+      // личный словарь: объединение (слова, которых нет в копии, остаются)
+      var dictionaryNote = '';
+      if (data.dictionary.isNotEmpty) {
+        try {
+          await _spell.dictionary.load();
+          final added = await _spell.dictionary.addAll(data.dictionary);
+          dictionaryNote = '\nСлов добавлено в личный словарь: $added.';
+        } catch (e) {
+          dictionaryNote =
+              '\nЛичный словарь не обновлён: ${describeError(e)}.';
+        }
+      }
 
       final c = dialogCtx;
       if (c != null && c.mounted) Navigator.of(c).pop();
@@ -1408,10 +1468,8 @@ class _CalendarPageState extends State<CalendarPage>
       if (result.ok) {
         await _showMessage(
             'Восстановление завершено',
-            data.topics.isEmpty
-                ? 'Восстановлено заметок: ${result.written} из ${result.total}.'
-                : 'Восстановлено заметок: ${data.notes.length}, '
-                    'тем: ${data.topics.length}.');
+            '${data.topics.isEmpty ? 'Восстановлено заметок: ${result.written} из ${result.total}.' : 'Восстановлено заметок: ${data.notes.length}, тем: ${data.topics.length}.'}'
+            '$dictionaryNote');
       } else {
         final String state;
         if (result.written == 0) {
@@ -1426,7 +1484,7 @@ class _CalendarPageState extends State<CalendarPage>
               '${result.notRolledBack.map(_restoreKeyLabel).join(', ')}.';
         }
         await _showMessage('Восстановление не завершено',
-            'Причина: ${result.error}.\n\n$state\n\n'
+            'Причина: ${result.error}.\n\n$state$dictionaryNote\n\n'
                 'Можно повторить восстановление из того же файла.',
             error: true);
       }
@@ -1947,6 +2005,28 @@ class _CalendarPageState extends State<CalendarPage>
   bool _goingToday = false;
 
   // ---------- работа без сети (логика — offline.dart) ----------
+
+  /// Личный словарь: users/{uid}/settings/dictionary
+  DocumentReference<Map<String, dynamic>>? get _dictionaryRef =>
+      _userRef?.collection('settings').doc('dictionary');
+
+  void _onDictionaryError(String message) {
+    if (!mounted || _signingOut) return;
+    _setStatus(message);
+  }
+
+  void _onDictionaryLateError(Object e) => _onDictionaryError(
+      'Ошибка сохранения словаря${e is FirebaseException ? ' (${e.code})' : ''}');
+
+  bool _spellFailedShown = false;
+
+  /// Словари не загрузились — проверка тихо выключается (одно сообщение)
+  void _onSpellFailed() {
+    if (!mounted || _spellFailedShown) return;
+    _spellFailedShown = true;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Проверка правописания сейчас недоступна')));
+  }
 
   /// users/{uid} вошедшего пользователя (null — нет входа)
   DocumentReference<Map<String, dynamic>>? get _userRef {
@@ -2478,6 +2558,7 @@ class _CalendarPageState extends State<CalendarPage>
       builder: (_) => _TemplatesDialog(
         initial: _templateSettings,
         store: _templateStore,
+        spell: _spell,
         // новые шаблоны — для следующих пустых дней, без перезагрузки;
         // уже открытый день не трогаем
         onSaved: (s) => _templateSettings = s,

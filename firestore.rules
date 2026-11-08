@@ -84,10 +84,40 @@ service cloud.firestore {
         && d.updatedAt == request.time;
     }
 
+    // Личный словарь проверки правописания — users/{uid}/settings/dictionary:
+    // { words: [строки 1..64 символа, не больше 5000], updatedAt: serverTimestamp }.
+    // Приложение пишет set(merge) с arrayUnion / arrayRemove; за одну запись
+    // добавляется не больше 20 новых слов — их длину правила и проверяют
+    // (перебирать весь список правила не умеют).
+    function okWord(l, i) {
+      return l.size() <= i || (l[i] is string && l[i].size() >= 1 && l[i].size() <= 64);
+    }
+
+    function isValidDictionary(d, old) {
+      let added = d.words.removeAll(old);
+      return d.keys().hasOnly(['words', 'updatedAt'])
+        && d.keys().hasAll(['words', 'updatedAt'])
+        && d.words is list
+        && d.words.size() <= 5000
+        && added.size() <= 20
+        && okWord(added, 0) && okWord(added, 1) && okWord(added, 2) && okWord(added, 3)
+        && okWord(added, 4) && okWord(added, 5) && okWord(added, 6) && okWord(added, 7)
+        && okWord(added, 8) && okWord(added, 9) && okWord(added, 10) && okWord(added, 11)
+        && okWord(added, 12) && okWord(added, 13) && okWord(added, 14) && okWord(added, 15)
+        && okWord(added, 16) && okWord(added, 17) && okWord(added, 18) && okWord(added, 19)
+        && d.updatedAt == request.time;
+    }
+
     match /users/{userId}/settings/{docId} {
-      allow read, delete: if isOwner(userId) && docId == 'templates';
-      allow create, update: if isOwner(userId) && docId == 'templates'
-        && isValidTemplates(request.resource.data);
+      allow read, delete: if isOwner(userId)
+        && (docId == 'templates' || docId == 'dictionary');
+      allow create: if isOwner(userId)
+        && ((docId == 'templates' && isValidTemplates(request.resource.data))
+          || (docId == 'dictionary' && isValidDictionary(request.resource.data, [])));
+      allow update: if isOwner(userId)
+        && ((docId == 'templates' && isValidTemplates(request.resource.data))
+          || (docId == 'dictionary'
+            && isValidDictionary(request.resource.data, resource.data.words)));
     }
   }
 }

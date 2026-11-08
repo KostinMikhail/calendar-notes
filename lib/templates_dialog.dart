@@ -8,11 +8,15 @@ class _TemplatesDialog extends StatefulWidget {
     required this.initial,
     required this.store,
     required this.onSaved,
+    this.spell,
   });
 
   final TemplateSettings initial;
   final TemplateStore store;
   final ValueChanged<TemplateSettings> onSaved;
+
+  /// Проверка правописания приложения (null — нет)
+  final SpellEngine? spell;
 
   @override
   State<_TemplatesDialog> createState() => _TemplatesDialogState();
@@ -50,6 +54,9 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
 
   @override
   QuillController get _ec => _tc;
+
+  @override
+  SpellEngine? get _spellEngine => widget.spell;
   @override
   FocusNode get _ef => _tf;
 

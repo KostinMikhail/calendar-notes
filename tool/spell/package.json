@@ -1,0 +1,10 @@
+{
+  "name": "calendar-notes-spell-worker",
+  "private": true,
+  "description": "Builds web/spell/v1/spell_worker.js (nspell in a Web Worker) and copies the Hunspell dictionaries.",
+  "dependencies": {
+    "dictionary-en": "4.0.0",
+    "dictionary-ru": "3.0.0",
+    "nspell": "2.1.5"
+  }
+}

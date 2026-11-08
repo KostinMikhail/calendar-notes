@@ -43,3 +43,8 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# сборка воркера правописания (tool/spell)
+tool/spell/node_modules/
+tool/spell/spell_worker.js
+tool/spell/package-lock.json
