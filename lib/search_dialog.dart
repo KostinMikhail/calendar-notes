@@ -387,17 +387,17 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
         controller: _query,
         focusNode: _queryFocus,
         autofocus: true,
-        style: const TextStyle(color: kTextPrimary),
+        style: TextStyle(color: kTextPrimary),
         cursorColor: kAccent,
         decoration: InputDecoration(
           hintText: 'Поиск по заметкам',
-          hintStyle: const TextStyle(color: kTextSecondary),
-          prefixIcon: const Icon(Icons.search, color: kTextSecondary),
+          hintStyle: TextStyle(color: kTextSecondary),
+          prefixIcon: Icon(Icons.search, color: kTextSecondary),
           suffixIcon: _query.text.isEmpty
               ? null
               : IconButton(
                   tooltip: 'Очистить',
-                  icon: const Icon(Icons.close, color: kTextSecondary),
+                  icon: Icon(Icons.close, color: kTextSecondary),
                   onPressed: () {
                     _query.clear();
                     _queryFocus.requestFocus();
@@ -408,11 +408,11 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
           isDense: true,
           enabledBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: kDivider),
+            borderSide: BorderSide(color: kDivider),
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: kAccent),
+            borderSide: BorderSide(color: kAccent),
           ),
         ),
       ),
@@ -442,7 +442,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
     if (pos < s.text.length) spans.add(TextSpan(text: s.text.substring(pos)));
     return Text.rich(
       TextSpan(
-        style: const TextStyle(color: kTextSecondary, fontSize: 13, height: 1.35),
+        style: TextStyle(color: kTextSecondary, fontSize: 13, height: 1.35),
         children: spans,
       ),
       maxLines: 3,
@@ -452,7 +452,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
 
   /// Название темы с подсветкой совпадений
   Widget _titleWithHighlights(String title, List<TextRange2> ranges) {
-    const base = TextStyle(
+    final base = TextStyle(
         color: kTextPrimary, fontSize: 14, fontWeight: FontWeight.w600);
     final spans = <TextSpan>[];
     var pos = 0;
@@ -481,7 +481,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
         ),
         child: Text(
           pluralMatches(count),
-          style: const TextStyle(color: kTextSecondary, fontSize: 11),
+          style: TextStyle(color: kTextSecondary, fontSize: 11),
         ),
       );
 
@@ -503,7 +503,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
         children: [
           Row(
             children: [
-              const Icon(Icons.topic_outlined, size: 16, color: kAccent),
+              Icon(Icons.topic_outlined, size: 16, color: kAccent),
               const SizedBox(width: 6),
               Expanded(
                 child: _titleWithHighlights(hit.topic.title, hit.titleRanges),
@@ -547,7 +547,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
               Expanded(
                 child: Text(
                   _dateLabel(hit.key),
-                  style: const TextStyle(
+                  style: TextStyle(
                     color: kTextPrimary,
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
@@ -565,7 +565,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
                   ),
                   child: Text(
                     pluralMatches(hit.hits.count),
-                    style: const TextStyle(color: kTextSecondary, fontSize: 11),
+                    style: TextStyle(color: kTextSecondary, fontSize: 11),
                   ),
                 ),
             ],
@@ -590,7 +590,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
 
   Widget _body() {
     if (_loading && _query.text.isEmpty) {
-      return const Padding(
+      return Padding(
         padding: EdgeInsets.symmetric(vertical: 24),
         child: Center(
           child: SizedBox(
@@ -602,7 +602,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
       );
     }
     if (_loading) {
-      return const Padding(
+      return Padding(
         padding: EdgeInsets.only(top: 8),
         child: LinearProgressIndicator(color: kAccent, backgroundColor: kCard),
       );
@@ -629,7 +629,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
     }
     if (!isQueryLongEnough(_applied)) return const SizedBox.shrink();
     if (_total == 0) {
-      return const Padding(
+      return Padding(
         padding: EdgeInsets.symmetric(vertical: 24),
         child: Center(
           child: Text('Ничего не найдено',
@@ -650,7 +650,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
             child: Text(
               'Показано $shown из $_total. Уточните запрос.',
               textAlign: TextAlign.center,
-              style: const TextStyle(color: kTextSecondary, fontSize: 12),
+              style: TextStyle(color: kTextSecondary, fontSize: 12),
             ),
           );
         },
@@ -666,7 +666,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
       insetPadding: const EdgeInsets.all(16),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: kDivider),
+        side: BorderSide(color: kDivider),
       ),
       child: ConstrainedBox(
         constraints: BoxConstraints(
@@ -685,7 +685,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
                 const SizedBox(height: 10),
                 Text(
                   _statusText(),
-                  style: const TextStyle(color: kTextSecondary, fontSize: 12),
+                  style: TextStyle(color: kTextSecondary, fontSize: 12),
                 ),
                 const SizedBox(height: 8),
                 _body(),

@@ -54,7 +54,7 @@ class _DictionaryDialogState extends State<_DictionaryDialog> {
   Widget build(BuildContext context) {
     return AlertDialog(
       backgroundColor: kSurface,
-      title: const Row(
+      title: Row(
         children: [
           Icon(Icons.spellcheck, color: kAccent),
           SizedBox(width: 10),
@@ -71,7 +71,7 @@ class _DictionaryDialogState extends State<_DictionaryDialog> {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Text(
+                Text(
                   'Эти слова не подчёркиваются при проверке правописания.',
                   style: TextStyle(color: kTextSecondary, fontSize: 13),
                 ),
@@ -83,7 +83,7 @@ class _DictionaryDialogState extends State<_DictionaryDialog> {
                         controller: _input,
                         focusNode: _focus,
                         autofocus: true,
-                        style: const TextStyle(color: kTextPrimary),
+                        style: TextStyle(color: kTextPrimary),
                         decoration: InputDecoration(
                           isDense: true,
                           hintText: 'Новое слово',
@@ -92,7 +92,7 @@ class _DictionaryDialogState extends State<_DictionaryDialog> {
                           fillColor: kCard,
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(color: kDivider),
+                            borderSide: BorderSide(color: kDivider),
                           ),
                         ),
                         onSubmitted: (_) => _add(),
@@ -101,7 +101,7 @@ class _DictionaryDialogState extends State<_DictionaryDialog> {
                     const SizedBox(width: 8),
                     IconButton(
                       tooltip: 'Добавить',
-                      icon: const Icon(Icons.add, color: kAccent),
+                      icon: Icon(Icons.add, color: kAccent),
                       onPressed: _add,
                     ),
                   ],
@@ -109,7 +109,7 @@ class _DictionaryDialogState extends State<_DictionaryDialog> {
                 const SizedBox(height: 10),
                 Text('Слов: ${words.length}',
                     style:
-                        const TextStyle(color: kTextSecondary, fontSize: 12)),
+                        TextStyle(color: kTextSecondary, fontSize: 12)),
                 const SizedBox(height: 6),
                 Expanded(
                   child: Container(
@@ -126,7 +126,7 @@ class _DictionaryDialogState extends State<_DictionaryDialog> {
                                       'правым щелчком по подчёркнутому слову.'
                                   : 'Загрузка…',
                               textAlign: TextAlign.center,
-                              style: const TextStyle(
+                              style: TextStyle(
                                   color: kTextSecondary, fontSize: 13),
                             ),
                           )
@@ -136,10 +136,10 @@ class _DictionaryDialogState extends State<_DictionaryDialog> {
                               dense: true,
                               visualDensity: VisualDensity.compact,
                               title: Text(words[i],
-                                  style: const TextStyle(color: kTextPrimary)),
+                                  style: TextStyle(color: kTextPrimary)),
                               trailing: IconButton(
                                 tooltip: 'Убрать из словаря',
-                                icon: const Icon(Icons.close,
+                                icon: Icon(Icons.close,
                                     size: 18, color: kTextSecondary),
                                 onPressed: () =>
                                     widget.dictionary.remove(words[i]),

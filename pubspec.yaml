@@ -31,3 +31,10 @@ flutter:
   uses-material-design: true
   assets:
     - assets/images/
+    # оформления (картинки и кот у каждого свои)
+    - assets/images/themes/violet/
+    - assets/images/themes/aurora/
+    - assets/images/themes/mars/
+    - assets/images/themes/blue/
+    - assets/images/themes/nebula/
+    - assets/images/themes/graphite/

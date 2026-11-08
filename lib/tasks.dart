@@ -24,6 +24,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 import 'package:flutter_quill/quill_delta.dart';
 
+import 'skins.dart' show currentSkin;
 import 'templates.dart'
     show TemplateComposition, TemplateLine, kTasksTitle, linesToOps, opsToLines;
 
@@ -1061,14 +1062,14 @@ class _TaskBox extends StatelessWidget {
               padding: const EdgeInsets.all(2.5),
               child: CircularProgressIndicator(
                 strokeWidth: 1.5,
-                color: active ? const Color(0xFF0E0D13) : color,
+                color: active ? currentSkin.value.background : color,
               ),
             )
           : Icon(
               icon,
               size: 12,
               color: active
-                  ? const Color(0xFF0E0D13)
+                  ? currentSkin.value.background
                   : color.withValues(alpha: 0.7),
             ),
     );

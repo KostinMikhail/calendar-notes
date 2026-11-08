@@ -129,3 +129,48 @@ void setLeaveGuard(bool on) {
         }).toJS);
   } catch (_) {}
 }
+
+// ---------- оформление: значок вкладки, цвет вкладки, фон страницы ----------
+
+@JS('document')
+external _Document get _document;
+
+extension type _Document(JSObject _) implements JSObject {
+  external _Element? querySelector(String selector);
+  external _Element createElement(String tag);
+  external _Element? get head;
+  external _Element? get body;
+  external _Element? get documentElement;
+}
+
+extension type _Element(JSObject _) implements JSObject {
+  external void setAttribute(String name, String value);
+  external void appendChild(_Element child);
+  external _Style get style;
+}
+
+extension type _Style(JSObject _) implements JSObject {
+  external set backgroundColor(String value);
+}
+
+_Element? _headTag(String selector, String tag, Map<String, String> attrs) {
+  final found = _document.querySelector(selector);
+  if (found != null) return found;
+  final head = _document.head;
+  if (head == null) return null;
+  final el = _document.createElement(tag);
+  attrs.forEach((k, v) => el.setAttribute(k, v));
+  head.appendChild(el);
+  return el;
+}
+
+void setBrowserChrome({required String favicon, required String color}) {
+  try {
+    _headTag('link[rel="icon"]', 'link', {'rel': 'icon', 'type': 'image/png'})
+        ?.setAttribute('href', favicon);
+    _headTag('meta[name="theme-color"]', 'meta', {'name': 'theme-color'})
+        ?.setAttribute('content', color);
+    _document.documentElement?.style.backgroundColor = color;
+    _document.body?.style.backgroundColor = color;
+  } catch (_) {}
+}

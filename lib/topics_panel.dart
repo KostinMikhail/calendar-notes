@@ -55,7 +55,7 @@ class TopicsPanel extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(16, 6, 6, 4),
               child: Row(
                 children: [
-                  const Expanded(
+                  Expanded(
                     child: Text(
                       'Темы',
                       style: TextStyle(
@@ -68,13 +68,13 @@ class TopicsPanel extends StatelessWidget {
                   IconButton(
                     visualDensity: VisualDensity.compact,
                     tooltip: 'Новая тема',
-                    icon: const Icon(Icons.add, color: kAccent),
+                    icon: Icon(Icons.add, color: kAccent),
                     onPressed: enabled ? onCreate : null,
                   ),
                 ],
               ),
             ),
-            const Divider(height: 1, color: kDivider),
+            Divider(height: 1, color: kDivider),
             Expanded(child: _body()),
           ],
         ),
@@ -85,7 +85,7 @@ class TopicsPanel extends StatelessWidget {
   Widget _body() {
     final c = controller;
     if (c.loading && !c.loaded) {
-      return const Center(
+      return Center(
         child: SizedBox(
           width: 22,
           height: 22,
@@ -110,7 +110,7 @@ class TopicsPanel extends StatelessWidget {
       );
     }
     if (c.topics.isEmpty) {
-      return const Center(
+      return Center(
         child: Padding(
           padding: EdgeInsets.all(16),
           child: Text(
@@ -164,7 +164,7 @@ class TopicsPanel extends StatelessWidget {
                 ReorderableDragStartListener(
                   index: index,
                   enabled: enabled,
-                  child: const MouseRegion(
+                  child: MouseRegion(
                     cursor: SystemMouseCursors.grab,
                     child: Padding(
                       padding: EdgeInsets.symmetric(horizontal: 6),
@@ -188,13 +188,13 @@ class TopicsPanel extends StatelessWidget {
                   tooltip: 'Действия',
                   enabled: enabled,
                   color: kCard,
-                  icon: const Icon(Icons.more_vert,
+                  icon: Icon(Icons.more_vert,
                       size: 18, color: kTextSecondary),
                   onSelected: (v) {
                     if (v == 'rename') onRename(t.id);
                     if (v == 'delete') onDelete(t.id);
                   },
-                  itemBuilder: (_) => const [
+                  itemBuilder: (_) => [
                     PopupMenuItem(
                       value: 'rename',
                       height: 40,
@@ -249,7 +249,7 @@ Future<String?> showTopicTitleDialog(
             autofocus: true,
             maxLength: kTopicTitleMax,
             maxLengthEnforcement: MaxLengthEnforcement.enforced,
-            style: const TextStyle(color: kTextPrimary),
+            style: TextStyle(color: kTextPrimary),
             cursorColor: kAccent,
             decoration: const InputDecoration(hintText: kTopicDefaultTitle),
             onSubmitted: (_) => submit(),
@@ -283,7 +283,7 @@ Future<bool> confirmTopicDelete(BuildContext context, String title) async {
       content: Text(
         'Тема «$title» будет удалена вместе с содержимым. '
         'Отменить это нельзя.',
-        style: const TextStyle(color: kTextPrimary),
+        style: TextStyle(color: kTextPrimary),
       ),
       actions: [
         TextButton(

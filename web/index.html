@@ -27,7 +27,32 @@
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
   <!-- Favicon -->
-  <link rel="icon" type="image/png" href="favicon.png"/>
+  <link rel="icon" type="image/png" href="favicons/violet.png"/>
+  <meta name="theme-color" content="#0E0D13">
+
+  <!--
+    Оформление (lib/skins.dart, kSkins): цвет фона страницы, цвет вкладки и
+    значок — ещё до загрузки Flutter, чтобы не мелькали чужие цвета.
+    Таблица цветов сверяется с Dart-таблицей тестом (test/skins_test.dart).
+  -->
+  <script>
+    (function () {
+      var SKIN_BACKGROUNDS = {"violet": "#0E0D13", "aurora": "#091112", "mars": "#130D0B", "blue": "#080C15", "nebula": "#120A11", "graphite": "#0E0E0F"};
+      var id = 'violet';
+      try {
+        var saved = window.localStorage.getItem('calendar_skin');
+        if (saved && Object.prototype.hasOwnProperty.call(SKIN_BACKGROUNDS, saved)) id = saved;
+      } catch (e) {}
+      var bg = SKIN_BACKGROUNDS[id];
+      var style = document.createElement('style');
+      style.textContent = 'html, body { background-color: ' + bg + '; }';
+      document.head.appendChild(style);
+      var icon = document.querySelector('link[rel="icon"]');
+      if (icon) icon.setAttribute('href', 'favicons/' + id + '.png');
+      var meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', bg);
+    })();
+  </script>
 
   <title>calendar_notes</title>
   <link rel="manifest" href="manifest.json">

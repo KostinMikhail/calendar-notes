@@ -20,6 +20,7 @@ import 'backup.dart';
 import 'dividers.dart';
 import 'firebase_options.dart';
 import 'format_menu.dart';
+import 'skins.dart';
 import 'spell/dictionary_dialog.dart';
 import 'spell/personal_dictionary.dart';
 import 'spell/spell_backend.dart';
@@ -42,6 +43,8 @@ part 'templates_dialog.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // оформление — до первого кадра (без мелькания чужих цветов)
+  initSkin();
   // Firebase запускается уже под экраном загрузки (см. AuthGate)
   runApp(const MyApp());
 }
@@ -64,14 +67,22 @@ Future<void> _initFirebase() async {
 // ============================================================
 //  Палитра
 // ============================================================
-const Color kBackground = Color(0xFF0E0D13);
-const Color kSurface = Color(0xFF15141C);
-const Color kCard = Color(0xFF1C1A25);
-const Color kAccent = Color(0xFF9C8FCB);
-const Color kAccentLight = Color(0xFFC9BCE6);
-const Color kTextPrimary = Color(0xFFECEAF2);
-const Color kTextSecondary = Color(0xFF8D8A9C);
-const Color kDivider = Color(0xFF292734);
+// Цвета берутся из текущего оформления (skins.dart); при смене оформления
+// все виджеты перестраиваются (rebuildAllWidgets), состояние не теряется.
+Color get kBackground => currentSkin.value.background;
+Color get kSurface => currentSkin.value.surface;
+Color get kCard => currentSkin.value.card;
+Color get kAccent => currentSkin.value.accent;
+Color get kAccentLight => currentSkin.value.accentLight;
+Color get kTextPrimary => currentSkin.value.textPrimary;
+Color get kTextSecondary => currentSkin.value.textSecondary;
+Color get kDivider => currentSkin.value.divider;
+
+/// Тонкие линии (разделитель в заметке)
+Color get kSubtle => currentSkin.value.subtle;
+
+/// Приглушённый текст (дни соседнего месяца)
+Color get kMuted => currentSkin.value.muted;
 
 // Цвета текста (кнопки в панели форматирования)
 const String kRed = '#FF5C5C';
@@ -230,7 +241,7 @@ class DividerEmbedBuilder extends EmbedBuilder {
         height: 2,
         margin: const EdgeInsets.symmetric(vertical: 10),
         decoration: BoxDecoration(
-          color: const Color(0xFF34313F),
+          color: kSubtle,
           borderRadius: BorderRadius.circular(1),
         ),
       ),
@@ -315,7 +326,7 @@ class _CopyUrlEntryState extends State<_CopyUrlEntry> {
                       color: kAccent,
                       borderRadius: BorderRadius.circular(6),
                     ),
-                    child: const Text(
+                    child: Text(
                       'Скопировано',
                       style: TextStyle(
                         color: kBackground,
@@ -397,6 +408,8 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Calendar Notes',
       debugShowCheckedModeBanner: false,
+      // смена оформления — сразу, без перетекания цветов темы
+      themeAnimationDuration: Duration.zero,
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,
         GlobalWidgetsLocalizations.delegate,
@@ -404,17 +417,7 @@ class MyApp extends StatelessWidget {
         FlutterQuillLocalizations.delegate,
       ],
       supportedLocales: const [Locale('ru'), Locale('en')],
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: kBackground,
-        colorScheme: const ColorScheme.dark(
-          primary: kAccent,
-          secondary: kAccentLight,
-          surface: kSurface,
-        ),
-        useMaterial3: true,
-        fontFamily: 'sans-serif',
-      ),
+      theme: skinTheme(currentSkin.value),
       home: const AuthGate(),
     );
   }
@@ -441,6 +444,10 @@ class _AuthGateState extends State<AuthGate> {
   void initState() {
     super.initState();
     _start();
+    // картинки оформления: текущего — сразу, остальных — потом, в фоне
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) precacheSkinImages(context);
+    });
   }
 
   Future<void> _start() async {
@@ -499,7 +506,7 @@ class _Splash extends StatelessWidget {
                 padding: const EdgeInsets.all(24),
                 child: Text(message!,
                     textAlign: TextAlign.center,
-                    style: const TextStyle(color: kTextSecondary)),
+                    style: TextStyle(color: kTextSecondary)),
               ),
       ),
     );
@@ -628,22 +635,22 @@ class _LoginPageState extends State<LoginPage> {
 
   InputDecoration _field(String label, {Widget? suffix}) => InputDecoration(
         labelText: label,
-        labelStyle: const TextStyle(color: kTextSecondary),
-        floatingLabelStyle: const TextStyle(color: kAccent),
+        labelStyle: TextStyle(color: kTextSecondary),
+        floatingLabelStyle: TextStyle(color: kAccent),
         filled: true,
         fillColor: kCard,
         suffixIcon: suffix,
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: kDivider),
+          borderSide: BorderSide(color: kDivider),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: kAccent),
+          borderSide: BorderSide(color: kAccent),
         ),
         disabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: kDivider),
+          borderSide: BorderSide(color: kDivider),
         ),
       );
 
@@ -680,7 +687,7 @@ class _LoginPageState extends State<LoginPage> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      const Row(
+                      Row(
                         children: [
                           Icon(Icons.calendar_month, color: kAccent),
                           SizedBox(width: 10),
@@ -695,7 +702,7 @@ class _LoginPageState extends State<LoginPage> {
                         ],
                       ),
                       const SizedBox(height: 6),
-                      const Text(
+                      Text(
                         'Войдите, чтобы открыть заметки',
                         style: TextStyle(color: kTextSecondary, fontSize: 13),
                       ),
@@ -710,7 +717,7 @@ class _LoginPageState extends State<LoginPage> {
                           AutofillHints.email,
                           AutofillHints.username,
                         ],
-                        style: const TextStyle(color: kTextPrimary),
+                        style: TextStyle(color: kTextPrimary),
                         decoration: _field('Email'),
                         onSubmitted: (_) => _passwordFocus.requestFocus(),
                       ),
@@ -724,7 +731,7 @@ class _LoginPageState extends State<LoginPage> {
                         enableSuggestions: false,
                         textInputAction: TextInputAction.done,
                         autofillHints: const [AutofillHints.password],
-                        style: const TextStyle(color: kTextPrimary),
+                        style: TextStyle(color: kTextPrimary),
                         decoration: _field(
                           'Пароль',
                           suffix: IconButton(
@@ -765,7 +772,7 @@ class _LoginPageState extends State<LoginPage> {
                           ),
                           onPressed: _busy ? null : _signIn,
                           child: _busy
-                              ? const SizedBox(
+                              ? SizedBox(
                                   width: 20,
                                   height: 20,
                                   child: CircularProgressIndicator(
@@ -935,6 +942,7 @@ class _CalendarPageState extends State<CalendarPage>
     super.initState();
     _controller = QuillController.basic(config: kEditorControllerConfig);
     _editorFocus = FocusNode();
+    _editorFocus.addListener(_onEditorFocusChanged);
     HardwareKeyboard.instance.addHandler(_onGlobalKey);
     WidgetsBinding.instance.addObserver(this);
     _controller.addListener(_onControllerChanged);
@@ -1003,12 +1011,19 @@ class _CalendarPageState extends State<CalendarPage>
             children: [
               Icon(icon, size: 18, color: kAccent),
               const SizedBox(width: 10),
-              Text(title, style: const TextStyle(color: kTextPrimary)),
+              Text(title, style: TextStyle(color: kTextPrimary)),
             ],
           ),
         );
 
     return PopupMenuButton<String>(
+      key: _menuButtonKey,
+      // был ли курсор в заметке (щелчок по кнопке сам снимает фокус с
+      // редактора) — после «Оформления» вернём его туда
+      onOpened: () => _editorHadFocus = _editorFocus.hasFocus ||
+          (_editorBlurAt != null &&
+              DateTime.now().difference(_editorBlurAt!) <
+                  const Duration(seconds: 1)),
       tooltip: _backupBusy ? 'Идёт работа с резервной копией' : 'Меню',
       enabled: !_backupBusy, // пока идёт копия/восстановление — меню закрыто
       color: kCard,
@@ -1018,7 +1033,7 @@ class _CalendarPageState extends State<CalendarPage>
               height: 20,
               child: CircularProgressIndicator(strokeWidth: 2),
             )
-          : const Icon(Icons.menu, color: kTextSecondary),
+          : Icon(Icons.menu, color: kTextSecondary),
       onSelected: (v) {
         switch (v) {
           case 'backup':
@@ -1036,6 +1051,9 @@ class _CalendarPageState extends State<CalendarPage>
           case 'dictionary':
             showPersonalDictionaryDialog(context, _spell.dictionary);
             break;
+          case 'skin':
+            _chooseSkin();
+            break;
           case 'logout':
             _signOut();
             break;
@@ -1047,11 +1065,11 @@ class _CalendarPageState extends State<CalendarPage>
             enabled: false,
             height: 32,
             child: Text(email,
-                style: const TextStyle(color: kTextSecondary, fontSize: 13)),
+                style: TextStyle(color: kTextSecondary, fontSize: 13)),
           ),
         item('backup', Icons.download_outlined, 'Создать резервную копию'),
         if (_offline)
-          const PopupMenuItem<String>(
+          PopupMenuItem<String>(
             enabled: false,
             height: 40,
             child: Row(
@@ -1070,12 +1088,13 @@ class _CalendarPageState extends State<CalendarPage>
           value: 'spell',
           height: 40,
           checked: _spell.enabled,
-          child: const Text('Проверка правописания',
+          child: Text('Проверка правописания',
               style: TextStyle(color: kTextPrimary)),
         ),
         item('dictionary', Icons.spellcheck, 'Личный словарь'),
+        item('skin', Icons.palette_outlined, 'Оформление'),
         const PopupMenuDivider(),
-        const PopupMenuItem<String>(
+        PopupMenuItem<String>(
           value: 'logout',
           height: 40,
           child: Row(
@@ -1088,6 +1107,62 @@ class _CalendarPageState extends State<CalendarPage>
         ),
       ],
     );
+  }
+
+  // ---------- оформление (skins.dart) ----------
+
+  final GlobalKey _menuButtonKey = GlobalKey();
+  bool _editorHadFocus = false;
+  DateTime? _editorBlurAt;
+
+  void _onEditorFocusChanged() {
+    if (!_editorFocus.hasFocus) _editorBlurAt = DateTime.now();
+  }
+
+  /// Второе маленькое меню рядом с кнопкой меню: шесть оформлений, у
+  /// текущего — галочка. Выбор применяется сразу (без перезагрузки и без
+  /// потери несохранённого текста).
+  Future<void> _chooseSkin() async {
+    final box = _menuButtonKey.currentContext?.findRenderObject();
+    final overlay = Overlay.of(context).context.findRenderObject();
+    if (box is! RenderBox || overlay is! RenderBox) return;
+    final topLeft = box.localToGlobal(Offset(0, box.size.height), ancestor: overlay);
+    final rect = topLeft & Size(box.size.width, 0);
+    final position = RelativeRect.fromRect(rect, Offset.zero & overlay.size);
+    final current = currentSkin.value;
+    final chosen = await showMenu<AppSkin>(
+      context: context,
+      position: position,
+      color: kCard,
+      items: [
+        for (final s in kSkins)
+          PopupMenuItem<AppSkin>(
+            value: s,
+            height: 40,
+            child: Row(
+              children: [
+                SkinSwatch(skin: s),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(s.title, style: TextStyle(color: kTextPrimary)),
+                ),
+                const SizedBox(width: 10),
+                Icon(Icons.check,
+                    size: 18,
+                    color: identical(s, current) ? kAccent : Colors.transparent),
+              ],
+            ),
+          ),
+      ],
+    );
+    if (chosen != null && mounted) setSkin(chosen);
+    // курсор — обратно в заметку, туда же, где был (выделение не менялось);
+    // после кадра — когда меню уже вернуло фокус на свою кнопку
+    if (mounted && _editorHadFocus) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _editorFocus.requestFocus();
+      });
+    }
   }
 
   // ---------- резервная копия ----------
@@ -1122,7 +1197,7 @@ class _CalendarPageState extends State<CalendarPage>
             Expanded(child: Text(title)),
           ],
         ),
-        content: Text(body, style: const TextStyle(color: kTextPrimary)),
+        content: Text(body, style: TextStyle(color: kTextPrimary)),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
@@ -1275,7 +1350,7 @@ class _CalendarPageState extends State<CalendarPage>
             '${data.topics.isEmpty ? '' : '• Темы из копии заменят темы с тем же идентификатором или будут созданы; остальные темы не изменятся.\n'}'
             '${data.dictionary.isEmpty ? '' : '• Слова из копии добавятся в личный словарь; ваши слова останутся.\n'}'
             '• Шаблоны по дням недели не изменятся.',
-            style: const TextStyle(color: kTextPrimary, height: 1.4),
+            style: TextStyle(color: kTextPrimary, height: 1.4),
           ),
         ),
         actions: [
@@ -1430,7 +1505,7 @@ class _CalendarPageState extends State<CalendarPage>
                     ),
                     const SizedBox(height: 12),
                     Text('Восстановлено ${p.$1} из ${p.$2}',
-                        style: const TextStyle(color: kTextPrimary)),
+                        style: TextStyle(color: kTextPrimary)),
                   ],
                 ),
               ),
@@ -2126,11 +2201,11 @@ class _CalendarPageState extends State<CalendarPage>
               if (progress != null) ...[
                 Text(progress,
                     style:
-                        const TextStyle(color: kTextSecondary, fontSize: 12)),
+                        TextStyle(color: kTextSecondary, fontSize: 12)),
                 const SizedBox(width: 10),
               ],
               if (offlineCacheLimited) ...[
-                const Tooltip(
+                Tooltip(
                   message: kCacheLimitedHint,
                   child: Text('Офлайн-защита ограничена',
                       style: TextStyle(color: kTextSecondary, fontSize: 12)),
@@ -2454,7 +2529,7 @@ class _CalendarPageState extends State<CalendarPage>
                 ),
                 child: Text(
                   text,
-                  style: const TextStyle(color: kTextPrimary, fontSize: 12),
+                  style: TextStyle(color: kTextPrimary, fontSize: 12),
                 ),
               ),
             ),
@@ -2665,13 +2740,13 @@ class _CalendarPageState extends State<CalendarPage>
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.topic_outlined, size: 18, color: kAccent),
+                Icon(Icons.topic_outlined, size: 18, color: kAccent),
                 const SizedBox(width: 8),
                 Flexible(
                   child: Text(
                     title,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
+                    style: TextStyle(
                       color: kAccentLight,
                       fontSize: 17,
                       fontWeight: FontWeight.w600,
@@ -2772,7 +2847,7 @@ class _CalendarPageState extends State<CalendarPage>
         children: [
           // баннер с дизерингом (318x112): одна точка = один логический пиксель
           Image.asset(
-            'assets/images/banner.png',
+            currentSkin.value.banner,
             width: double.infinity,
             height: 112,
             fit: BoxFit.cover,
@@ -2821,7 +2896,7 @@ class _CalendarPageState extends State<CalendarPage>
         dowBuilder: (context, day) => Center(
           child: Text(
             kWeekdaysShort[day.weekday - 1],
-            style: const TextStyle(
+            style: TextStyle(
               color: kTextSecondary,
               fontSize: 12,
               fontWeight: FontWeight.w500,
@@ -2835,10 +2910,10 @@ class _CalendarPageState extends State<CalendarPage>
         titleCentered: true,
         titleTextFormatter: (date, locale) =>
             '${kMonthsNom[date.month - 1]} ${date.year}',
-        titleTextStyle: const TextStyle(
+        titleTextStyle: TextStyle(
             color: kTextPrimary, fontSize: 16, fontWeight: FontWeight.w600),
-        leftChevronIcon: const Icon(Icons.chevron_left, color: kAccent),
-        rightChevronIcon: const Icon(Icons.chevron_right, color: kAccent),
+        leftChevronIcon: Icon(Icons.chevron_left, color: kAccent),
+        rightChevronIcon: Icon(Icons.chevron_right, color: kAccent),
       ),
     );
   }
@@ -2854,7 +2929,7 @@ class _CalendarPageState extends State<CalendarPage>
               onPressed: _pickerYear > 2020
                   ? () => setState(() => _pickerYear--)
                   : null,
-              icon: const Icon(Icons.chevron_left, color: kAccent),
+              icon: Icon(Icons.chevron_left, color: kAccent),
             ),
             Expanded(
               child: InkWell(
@@ -2865,7 +2940,7 @@ class _CalendarPageState extends State<CalendarPage>
                   child: Center(
                     child: Text(
                       '$_pickerYear',
-                      style: const TextStyle(
+                      style: TextStyle(
                         color: kTextPrimary,
                         fontSize: 16,
                         fontWeight: FontWeight.w600,
@@ -2879,7 +2954,7 @@ class _CalendarPageState extends State<CalendarPage>
               onPressed: _pickerYear < 2030
                   ? () => setState(() => _pickerYear++)
                   : null,
-              icon: const Icon(Icons.chevron_right, color: kAccent),
+              icon: Icon(Icons.chevron_right, color: kAccent),
             ),
           ],
         ),
@@ -2960,7 +3035,7 @@ class _CalendarPageState extends State<CalendarPage>
               ),
               IconButton(
                 visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.search, color: kAccent),
+                icon: Icon(Icons.search, color: kAccent),
                 tooltip: 'Поиск по заметкам',
                 onPressed: _openSearch,
               ),
@@ -2975,7 +3050,7 @@ class _CalendarPageState extends State<CalendarPage>
                     : Text(
                   _formatDate(_selectedDay),
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
+                  style: TextStyle(
                     color: kAccentLight,
                     fontSize: 17,
                     fontWeight: FontWeight.w600,
@@ -3027,7 +3102,7 @@ class _CalendarPageState extends State<CalendarPage>
                             opacity: empty ? 1 : 0,
                             child: Center(
                               child: Image.asset(
-                                'assets/images/empty_day.png',
+                                currentSkin.value.emptyDay,
                                 width: 176,
                                 height: 176,
                                 filterQuality: FilterQuality.none,
@@ -3133,11 +3208,11 @@ class _CalendarPageState extends State<CalendarPage>
 }
 
 /// Оформление дней календаря (сегодня, выбранный, выходные)
-const CalendarStyle kCalendarStyle = CalendarStyle(
+CalendarStyle get kCalendarStyle => CalendarStyle(
   cellMargin: EdgeInsets.all(4),
   defaultTextStyle: TextStyle(color: kTextPrimary),
   weekendTextStyle: TextStyle(color: kTextSecondary),
-  outsideTextStyle: TextStyle(color: Color(0xFF55526A)),
+  outsideTextStyle: TextStyle(color: kMuted),
   todayTextStyle: TextStyle(color: kAccentLight, fontWeight: FontWeight.bold),
   selectedTextStyle:
       TextStyle(color: kBackground, fontWeight: FontWeight.bold),
@@ -3148,7 +3223,7 @@ const CalendarStyle kCalendarStyle = CalendarStyle(
 
 /// Заливка сегодняшнего дня, пока открыта тема: тот же цвет, что у яркого
 /// выделения, но на 40 %
-const Color kMutedSelection = Color(0x669C8FCB);
+Color get kMutedSelection => kAccent.withAlpha(0x66);
 
 /// Какой день отмечен в календаре: открыт день — он сам (ярко); открыта
 /// тема — сегодняшний (приглушённо), а не тот, с которого перешли
@@ -3185,13 +3260,13 @@ class MutedSelectedDay extends StatelessWidget {
       margin: kCalendarStyle.cellMargin,
       padding: kCalendarStyle.cellPadding,
       alignment: kCalendarStyle.cellAlignment,
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
           color: kMutedSelection, shape: BoxShape.circle),
       child: Text(
         '${day.day}',
         style: isToday
             ? kCalendarStyle.todayTextStyle
-            : const TextStyle(color: kTextPrimary, fontWeight: FontWeight.w600),
+            : TextStyle(color: kTextPrimary, fontWeight: FontWeight.w600),
       ),
     );
   }
@@ -3234,7 +3309,7 @@ class TodayButton extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 12),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
-                side: const BorderSide(color: kDivider),
+                side: BorderSide(color: kDivider),
               ),
             ),
           ),
@@ -3260,7 +3335,7 @@ class _OfflineChip extends StatelessWidget {
           borderRadius: BorderRadius.circular(10),
           border: Border.all(color: kDivider),
         ),
-        child: const Row(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(Icons.cloud_off_outlined, size: 13, color: kAccentLight),
@@ -3289,7 +3364,7 @@ class _UnknownDayBanner extends StatelessWidget {
           borderRadius: BorderRadius.circular(10),
           border: Border.all(color: const Color(0x66FFD54A)),
         ),
-        child: const Row(
+        child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Icon(Icons.info_outline, size: 17, color: Color(0xFFFFD54A)),

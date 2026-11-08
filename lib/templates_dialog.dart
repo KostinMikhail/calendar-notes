@@ -200,7 +200,7 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
       builder: (ctx) => AlertDialog(
         backgroundColor: kSurface,
         title: Text(title),
-        content: Text(body, style: const TextStyle(color: kTextPrimary)),
+        content: Text(body, style: TextStyle(color: kTextPrimary)),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -269,7 +269,7 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
       isExpanded: true,
       dropdownColor: kCard,
       underline: const SizedBox.shrink(),
-      style: const TextStyle(color: kTextPrimary, fontSize: 14),
+      style: TextStyle(color: kTextPrimary, fontSize: 14),
       items: [
         for (final k in keys)
           DropdownMenuItem(
@@ -299,7 +299,7 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
         insetPadding: const EdgeInsets.all(16),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: kDivider),
+          side: BorderSide(color: kDivider),
         ),
         child: SizedBox(
           width: min(760, size.width - 32),
@@ -311,9 +311,9 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.view_agenda_outlined, color: kAccent),
+                    Icon(Icons.view_agenda_outlined, color: kAccent),
                     const SizedBox(width: 10),
-                    const Expanded(
+                    Expanded(
                       child: Text(
                         'Шаблоны дня',
                         style: TextStyle(
@@ -328,7 +328,7 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
                   ],
                 ),
                 const SizedBox(height: 6),
-                const Text(
+                Text(
                   'Шаблон подставляется только в новый пустой день. '
                   'Уже созданные заметки не меняются. Пустой шаблон — '
                   'день начнётся с чистого листа.',
@@ -349,7 +349,7 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
                   Text(
                     _blockInfo[_key.substring(2)]!.$2,
                     style:
-                        const TextStyle(color: kTextSecondary, fontSize: 12),
+                        TextStyle(color: kTextSecondary, fontSize: 12),
                   ),
                 ],
                 const SizedBox(height: 10),

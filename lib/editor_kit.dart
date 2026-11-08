@@ -722,7 +722,7 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
             children: [
               Icon(icon, size: 18, color: kTextSecondary),
               const SizedBox(width: 10),
-              Text(title, style: const TextStyle(color: kTextPrimary)),
+              Text(title, style: TextStyle(color: kTextPrimary)),
             ],
           ),
         );

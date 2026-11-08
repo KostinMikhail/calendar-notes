@@ -16,7 +16,7 @@ import 'spell_engine.dart';
 import 'tokenizer.dart';
 
 /// Цвет подчёркивания: приглушённый серый (вторичный текст на 65 %)
-const Color kSpellUnderline = Color(0xA68D8A9C);
+Color get kSpellUnderline => kTextSecondary.withAlpha(0xA6);
 
 /// Пауза после последней правки перед проверкой
 const Duration kSpellDebounce = Duration(milliseconds: 400);
@@ -470,9 +470,9 @@ class SpellCheckHostState extends State<SpellCheckHost> {
       padding: const EdgeInsets.only(left: 14, right: 4),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(10),
-        side: const BorderSide(color: kDivider),
+        side: BorderSide(color: kDivider),
       ),
-      content: const Text('Добавлено в словарь',
+      content: Text('Добавлено в словарь',
           style: TextStyle(color: kTextPrimary, fontSize: 13)),
       action: SnackBarAction(
         label: 'Отменить',
