@@ -2718,6 +2718,8 @@ class _CalendarPageState extends State<CalendarPage>
         _showMonths = true;
       }),
       calendarBuilders: CalendarBuilders(
+        // открыта тема — день, к которому вернёмся, виден приглушённо
+        selectedBuilder: selectedDayBuilder(topicOpen: _openTopicId != null),
         dowBuilder: (context, day) => Center(
           child: Text(
             kWeekdaysShort[day.weekday - 1],
@@ -2729,20 +2731,7 @@ class _CalendarPageState extends State<CalendarPage>
           ),
         ),
       ),
-      calendarStyle: const CalendarStyle(
-        cellMargin: EdgeInsets.all(4),
-        defaultTextStyle: TextStyle(color: kTextPrimary),
-        weekendTextStyle: TextStyle(color: kTextSecondary),
-        outsideTextStyle: TextStyle(color: Color(0xFF55526A)),
-        todayTextStyle:
-            TextStyle(color: kAccentLight, fontWeight: FontWeight.bold),
-        selectedTextStyle:
-            TextStyle(color: kBackground, fontWeight: FontWeight.bold),
-        todayDecoration:
-            BoxDecoration(color: Colors.transparent, shape: BoxShape.circle),
-        selectedDecoration:
-            BoxDecoration(color: kAccent, shape: BoxShape.circle),
-      ),
+      calendarStyle: kCalendarStyle,
       headerStyle: HeaderStyle(
         formatButtonVisible: false,
         titleCentered: true,
@@ -3031,6 +3020,62 @@ class _CalendarPageState extends State<CalendarPage>
             );
           },
         ),
+      ),
+    );
+  }
+}
+
+/// Оформление дней календаря (сегодня, выбранный, выходные)
+const CalendarStyle kCalendarStyle = CalendarStyle(
+  cellMargin: EdgeInsets.all(4),
+  defaultTextStyle: TextStyle(color: kTextPrimary),
+  weekendTextStyle: TextStyle(color: kTextSecondary),
+  outsideTextStyle: TextStyle(color: Color(0xFF55526A)),
+  todayTextStyle: TextStyle(color: kAccentLight, fontWeight: FontWeight.bold),
+  selectedTextStyle:
+      TextStyle(color: kBackground, fontWeight: FontWeight.bold),
+  todayDecoration:
+      BoxDecoration(color: Colors.transparent, shape: BoxShape.circle),
+  selectedDecoration: BoxDecoration(color: kAccent, shape: BoxShape.circle),
+);
+
+/// Заливка выбранного дня, пока открыта тема: тот же цвет, что у яркого
+/// выделения, но на 40 %
+const Color kMutedSelection = Color(0x669C8FCB);
+
+/// Ячейка выбранного дня: открыта тема — приглушённая заливка (свой
+/// виджет, без анимации — без кадра яркого круга); открыт день — null,
+/// обычное яркое выделение календаря
+FocusedDayBuilder? selectedDayBuilder({
+  required bool topicOpen,
+  DateTime Function() now = DateTime.now,
+}) {
+  if (!topicOpen) return null;
+  return (context, day, focusedDay) =>
+      MutedSelectedDay(day: day, isToday: isSameDay(day, now()));
+}
+
+/// Выбранный день, пока открыта тема. Сегодняшний день сохраняет свою
+/// отметку (сиреневый жирный номер) поверх заливки.
+class MutedSelectedDay extends StatelessWidget {
+  const MutedSelectedDay({super.key, required this.day, required this.isToday});
+
+  final DateTime day;
+  final bool isToday;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: kCalendarStyle.cellMargin,
+      padding: kCalendarStyle.cellPadding,
+      alignment: kCalendarStyle.cellAlignment,
+      decoration: const BoxDecoration(
+          color: kMutedSelection, shape: BoxShape.circle),
+      child: Text(
+        '${day.day}',
+        style: isToday
+            ? kCalendarStyle.todayTextStyle
+            : const TextStyle(color: kTextPrimary, fontWeight: FontWeight.w600),
       ),
     );
   }
