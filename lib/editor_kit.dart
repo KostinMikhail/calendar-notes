@@ -601,20 +601,19 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
     _ec.compose(delta, _ec.selection, ChangeSource.local);
   }
 
-  /// Адрес для открытия: без схемы — добавляем https://
-  String _normalizeUrl(String raw) {
-    final s = raw.trim();
-    final asUrl = _asUrl(s);
-    if (asUrl != null) return asUrl;
-    if (s.startsWith(RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*:'))) return s;
-    return 'https://$s';
-  }
-
   /// Открывает ссылку в новой вкладке. Вызывается синхронно из клика:
-  /// launchUrl в вебе доходит до window.open без await.
+  /// launchUrl в вебе доходит до window.open без await. Адрес проверяется
+  /// заново: только http, https, mailto, tel (см. [safeLinkUri]).
   void _openUrl(String url) {
-    final uri = Uri.tryParse(_normalizeUrl(url));
-    if (uri == null) return;
+    final uri = safeLinkUri(url);
+    if (uri == null) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
+        content: const Text('Эту ссылку не открываем: у неё неподдерживаемый '
+            'адрес. $kLinkSchemesHint.'),
+      ),
+          snackBarAnimationStyle: Motion.snackBar);
+      return;
+    }
     launchUrl(uri, webOnlyWindowName: '_blank').catchError((_) => false);
   }
 
@@ -768,16 +767,16 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
     }
   }
 
+  /// Вставка из буфера становится ссылкой, только если это явно адрес:
+  /// http(s)://…, mailto:…, tel:… или www.… (и адрес безопасный)
   String? _asUrl(String? raw) {
     if (raw == null) return null;
     final s = raw.trim();
     if (s.isEmpty || RegExp(r'\s').hasMatch(s)) return null;
-    if (RegExp(r'^(https?|ftp)://\S+$', caseSensitive: false).hasMatch(s) ||
-        RegExp(r'^mailto:\S+$', caseSensitive: false).hasMatch(s)) {
-      return s;
-    }
-    if (RegExp(r'^www\.\S+\.\S+$', caseSensitive: false).hasMatch(s)) {
-      return 'https://$s';
+    if (RegExp(r'^(https?://\S|mailto:\S|tel:\S|www\.\S+\.\S)',
+            caseSensitive: false)
+        .hasMatch(s)) {
+      return normalizeLink(s);
     }
     return null;
   }
@@ -845,9 +844,21 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
     final urlCtrl = TextEditingController(text: oldUrl ?? '');
     final textCtrl = TextEditingController(text: selectedText);
 
+    // адрес проверяем до закрытия окна: неподходящий — подсказка под полем
+    String? urlError;
     final ok = await showAppDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setDialog) {
+        void submit() {
+          final raw = urlCtrl.text.trim();
+          if (raw.isNotEmpty && normalizeLink(raw) == null) {
+            setDialog(() => urlError = kLinkSchemesHint);
+            return;
+          }
+          Navigator.pop(ctx, true);
+        }
+
+        return AlertDialog(
         backgroundColor: kSurface,
         title: Text(oldUrl == null ? 'Вставить ссылку' : 'Изменить ссылку'),
         content: SizedBox(
@@ -863,9 +874,15 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
               TextField(
                 controller: urlCtrl,
                 autofocus: true,
-                decoration:
-                    const InputDecoration(labelText: 'Адрес (https://...)'),
-                onSubmitted: (_) => Navigator.pop(ctx, true),
+                decoration: InputDecoration(
+                  labelText: 'Адрес (https://...)',
+                  errorText: urlError,
+                  errorMaxLines: 2,
+                ),
+                onChanged: (_) {
+                  if (urlError != null) setDialog(() => urlError = null);
+                },
+                onSubmitted: (_) => submit(),
               ),
             ],
           ),
@@ -875,10 +892,11 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
               onPressed: () => Navigator.pop(ctx, false),
               child: const Text('Отмена')),
           TextButton(
-              onPressed: () => Navigator.pop(ctx, true),
+              onPressed: submit,
               child: Text(oldUrl == null ? 'Вставить' : 'Сохранить')),
         ],
-      ),
+      );
+      }),
     );
     final rawUrl = urlCtrl.text.trim();
     final label = textCtrl.text.trim();
@@ -890,7 +908,11 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
     }
     if (rawUrl.isEmpty || !identical(doc, _ec.document)) return;
 
-    final url = _normalizeUrl(rawUrl);
+    final url = normalizeLink(rawUrl);
+    if (url == null) {
+      _ef.requestFocus();
+      return;
+    }
     if (hasSelection) {
       _applyLink(start, len, '', url);
     } else {

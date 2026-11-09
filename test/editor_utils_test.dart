@@ -138,4 +138,66 @@ void main() {
       expect(ops[i - 1]['attributes'], {'list': 'ordered'}); // «пу» — пункт
     });
   });
+
+  group('ссылки: только безопасные адреса (аудит, F6)', () {
+    test('обычные адреса проходят, без схемы — https://', () {
+      expect(normalizeLink('https://ya.ru'), 'https://ya.ru');
+      expect(normalizeLink('  http://ya.ru/a?b=1  '), 'http://ya.ru/a?b=1');
+      expect(normalizeLink('HTTPS://YA.RU'), 'HTTPS://YA.RU');
+      expect(normalizeLink('ya.ru'), 'https://ya.ru');
+      expect(normalizeLink('www.ya.ru/путь'), 'https://www.ya.ru/путь');
+      expect(normalizeLink('localhost:3000/x'), 'https://localhost:3000/x');
+      expect(normalizeLink('example.com:8080'), 'https://example.com:8080');
+      expect(normalizeLink('mailto:me@example.com'), 'mailto:me@example.com');
+      expect(normalizeLink('tel:+79991234567'), 'tel:+79991234567');
+    });
+
+    for (final bad in [
+      'javascript:alert(1)',
+      'JavaScript:alert(1)',
+      ' javascript:alert(1)',
+      'javascript://%0aalert(1)',
+      '\u0001javascript:alert(1)',
+      'java\tscript:alert(1)',
+      'vbscript:msgbox(1)',
+      'data:text/html,<script>alert(1)</script>',
+      'file:///C:/Windows/win.ini',
+      'blob:https://example.com/uuid',
+      'intent://scan/#Intent;scheme=zxing;end',
+      'chrome://settings',
+      'ftp://example.com/file',
+      'https://',
+      'https:///path',
+      '//evil.example',
+      'mailto:',
+      'ya ru',
+      '',
+    ]) {
+      test('нельзя: ${bad.replaceAll(RegExp(r'[\u0000-\u001F]'), '·')}', () {
+        expect(normalizeLink(bad), isNull);
+        expect(safeLinkUri(bad), isNull);
+      });
+    }
+
+    test('сохранённая ссылка проверяется при открытии', () {
+      expect(safeLinkUri('https://ya.ru/a')?.toString(), 'https://ya.ru/a');
+      // старые ссылки без схемы открываются как https
+      expect(safeLinkUri('ya.ru')?.toString(), 'https://ya.ru');
+      expect(safeLinkUri('mailto:me@example.com')?.scheme, 'mailto');
+      expect(safeLinkUri('tel:+7999')?.scheme, 'tel');
+      expect(safeLinkUri('JAVASCRIPT:alert(1)'), isNull);
+    });
+
+    test('всё, что прошло проверку, открывается', () {
+      for (final ok in ['ya.ru', 'https://ya.ru', 'mailto:a@b.ru', 'tel:1']) {
+        expect(safeLinkUri(normalizeLink(ok)!), isNotNull, reason: ok);
+      }
+    });
+
+    test('подсказка называет разрешённые схемы', () {
+      for (final s in kLinkSchemes) {
+        expect(kLinkSchemesHint, contains(s));
+      }
+    });
+  });
 }

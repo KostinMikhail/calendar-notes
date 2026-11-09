@@ -174,3 +174,69 @@ class ClickCounter {
     _lastPos = null;
   }
 }
+
+// ---------- ссылки: только безопасные адреса ----------
+
+/// Схемы, которые можно сохранить в ссылке и открыть. Всё остальное
+/// (javascript:, data:, file:, blob:, intent:…) — нельзя: открытие такой
+/// ссылки может выполнить код или показать чужое содержимое.
+const Set<String> kLinkSchemes = {'http', 'https', 'mailto', 'tel'};
+
+/// Подсказка, когда адрес не подошёл
+const String kLinkSchemesHint = 'Можно только адреса http, https, mailto и tel';
+
+final RegExp _schemeRe = RegExp(
+  r'^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$',
+  dotAll: true,
+);
+final RegExp _controlRe = RegExp(r'[\u0000-\u001F\u007F-\u009F\s]');
+
+/// Адрес, введённый пользователем, → адрес для ссылки или null, если
+/// такой адрес ссылкой быть не может. Без схемы (example.com,
+/// localhost:3000/путь) добавляется https://.
+String? normalizeLink(String raw) {
+  final s = raw.trim();
+  if (s.isEmpty || _controlRe.hasMatch(s)) return null;
+  final m = _schemeRe.firstMatch(s);
+  String url;
+  if (m == null) {
+    url = 'https://$s';
+  } else {
+    final scheme = m.group(1)!;
+    final rest = m.group(2)!;
+    // «example.com:8080», «localhost:3000» — это адрес с портом, не схема
+    final looksLikeHost = scheme.contains('.') || RegExp(r'^\d').hasMatch(rest);
+    if (looksLikeHost) {
+      url = 'https://$s';
+    } else if (kLinkSchemes.contains(scheme.toLowerCase())) {
+      url = s;
+    } else {
+      return null;
+    }
+  }
+  return safeLinkUri(url) == null ? null : url;
+}
+
+/// Сохранённая ссылка → адрес для открытия или null (не открываем).
+/// Проверяется заново при каждом открытии: ссылка могла попасть в заметку
+/// до этой проверки (старая версия, восстановление из копии).
+Uri? safeLinkUri(String url) {
+  final s = url.trim();
+  if (s.isEmpty || _controlRe.hasMatch(s)) return null;
+  final m = _schemeRe.firstMatch(s);
+  final full =
+      m == null ||
+          m.group(1)!.contains('.') ||
+          RegExp(r'^\d').hasMatch(m.group(2)!)
+      ? 'https://$s'
+      : s;
+  final uri = Uri.tryParse(full);
+  if (uri == null || !kLinkSchemes.contains(uri.scheme)) return null;
+  if ((uri.scheme == 'http' || uri.scheme == 'https') && uri.host.isEmpty) {
+    return null;
+  }
+  if ((uri.scheme == 'mailto' || uri.scheme == 'tel') && uri.path.isEmpty) {
+    return null;
+  }
+  return uri;
+}
