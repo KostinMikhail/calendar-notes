@@ -306,7 +306,14 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
           height: size.height * 0.85,
           child: Padding(
             padding: const EdgeInsets.all(16),
-            child: Column(
+            child: LayoutBuilder(builder: (context, box) {
+            // низкое окно (телефон боком): всё окно прокручивается, у
+            // редактора своя высота; обычное окно — как раньше
+            final cramped = box.maxHeight < 560;
+            Widget editorSlot(Widget x) => cramped
+                ? SizedBox(height: 200, child: x)
+                : Expanded(child: x);
+            final column = Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Row(
@@ -323,8 +330,13 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
                         ),
                       ),
                     ),
-                    Text(_status,
-                        style: TextStyle(color: statusColor, fontSize: 13)),
+                    // узкое окно — статус сжимается с многоточием
+                    Flexible(
+                      child: Text(_status,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: statusColor, fontSize: 13)),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 6),
@@ -363,8 +375,8 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
                   child: _toolbar(),
                 ),
                 const SizedBox(height: 10),
-                Expanded(
-                  child: Container(
+                editorSlot(
+                  Container(
                     padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
                       color: kCard,
@@ -428,7 +440,9 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
                   ],
                 ),
               ],
-            ),
+            );
+            return cramped ? SingleChildScrollView(child: column) : column;
+          }),
           ),
         ),
       ),

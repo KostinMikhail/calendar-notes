@@ -20,6 +20,7 @@ import 'backup.dart';
 import 'dividers.dart';
 import 'firebase_options.dart';
 import 'format_menu.dart';
+import 'responsive_layout.dart';
 import 'limits.dart';
 import 'motion.dart';
 import 'skins.dart';
@@ -840,6 +841,42 @@ class _CalendarPageState extends State<CalendarPage>
   final FirebaseFirestore _db = FirebaseFirestore.instance;
 
   bool _calendarVisible = true;
+
+  /// Узкое окно: панель календаря и тем выехала поверх заметки. Выбор
+  /// «показать/скрыть колонку» в широком окне ([_calendarVisible]) она не
+  /// меняет.
+  bool _navOpen = false;
+
+  /// Курсор был в заметке, когда открыли панель — вернём его туда
+  bool _navReturnFocus = false;
+
+  /// Узкое окно: открыть / закрыть панель календаря и тем
+  void _toggleNav() {
+    if (_navOpen) {
+      _closeNav();
+      return;
+    }
+    // щелчок по кнопке сам снимает фокус с редактора — смотрим и на
+    // недавнюю потерю фокуса (как у меню)
+    _navReturnFocus = _editorFocus.hasFocus ||
+        (_editorBlurAt != null &&
+            DateTime.now().difference(_editorBlurAt!) <
+                const Duration(seconds: 1));
+    setState(() => _navOpen = true);
+  }
+
+  /// Закрыть панель (если открыта); курсор — обратно в заметку, если он
+  /// был там
+  void _closeNav() {
+    if (!_navOpen || !mounted) return;
+    setState(() => _navOpen = false);
+    if (_navReturnFocus) {
+      _navReturnFocus = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_navOpen) _editorFocus.requestFocus();
+      });
+    }
+  }
 
   /// Проверка правописания (словари грузятся в фоне после входа)
   late final SpellEngine _spell = SpellEngine(
@@ -2219,6 +2256,7 @@ class _CalendarPageState extends State<CalendarPage>
   }
 
   Future<void> _onDaySelected(DateTime selectedDay, DateTime focusedDay) async {
+    _closeNav(); // узкое окно: панель календаря уходит сама
     if (_backupBusy) return; // идёт копия/восстановление
     // не теряем несохранённые правки предыдущего дня; перенос задачи
     // должен отметить задачу в этой же заметке — ждём и его
@@ -2250,6 +2288,7 @@ class _CalendarPageState extends State<CalendarPage>
   /// (сохранение текущей заметки — внутри _onDaySelected), плюс сетка
   /// переходит на текущий месяц. «Сегодня» — по часам в момент нажатия.
   Future<void> _goToToday() async {
+    _closeNav();
     if (_backupBusy || _goingToday || _onToday) return;
     final today = localDate(DateTime.now());
     if (_openTopicId == null && isSameDay(_selectedDay, today)) {
@@ -2414,17 +2453,27 @@ class _CalendarPageState extends State<CalendarPage>
           return Row(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // в узком окне всё сжимается с многоточием (не переполняется)
               if (progress != null) ...[
-                Text(progress,
-                    style:
-                        TextStyle(color: kTextSecondary, fontSize: 12)),
+                Flexible(
+                  child: Text(progress,
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
+                      style:
+                          TextStyle(color: kTextSecondary, fontSize: 12)),
+                ),
                 const SizedBox(width: 10),
               ],
               if (offlineCacheLimited) ...[
-                Tooltip(
-                  message: kCacheLimitedHint,
-                  child: Text('Офлайн-защита ограничена',
-                      style: TextStyle(color: kTextSecondary, fontSize: 12)),
+                Flexible(
+                  child: Tooltip(
+                    message: kCacheLimitedHint,
+                    child: Text('Офлайн-защита ограничена',
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                        style:
+                            TextStyle(color: kTextSecondary, fontSize: 12)),
+                  ),
                 ),
                 const SizedBox(width: 10),
               ],
@@ -2911,6 +2960,7 @@ class _CalendarPageState extends State<CalendarPage>
   /// Открыть тему в центре (так же, как переход на другой день:
   /// дождаться сохранения и сохранить текущие правки)
   Future<void> _openTopic(String id) async {
+    _closeNav();
     if (_backupBusy) return;
     if (!await _waitTaskIdle()) return;
     // как при смене дня: запись в очереди сразу, сервер не ждём
@@ -3278,35 +3328,52 @@ class _CalendarPageState extends State<CalendarPage>
 
   // ---------- заметка ----------
 
-  Widget _notePanel() {
+  /// Панель заметки. [narrow] — узкое окно: поля меньше, кнопка у даты
+  /// открывает панель календаря и тем, панель форматирования в одну строку
+  /// (с прокруткой). Само содержимое (редактор) от ширины не зависит.
+  Widget _notePanel({bool narrow = false}) {
     return Container(
       decoration: BoxDecoration(
         color: kSurface,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: kDivider),
       ),
-      padding: const EdgeInsets.all(20),
+      padding: EdgeInsets.all(narrow ? 14 : 20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              // кнопка сворачивания календаря — рядом с датой
+              // кнопка календаря — рядом с датой: в широком окне сворачивает
+              // колонку, в узком — открывает панель календаря и тем
               PressScale(
-                child: IconButton(
-                  visualDensity: VisualDensity.compact,
-                  icon: Icon(
-                    _calendarVisible
-                        ? Icons.calendar_month
-                        : Icons.calendar_today,
-                    color: kAccent,
-                  ),
-                  tooltip: _calendarVisible
-                      ? 'Скрыть календарь'
-                      : 'Показать календарь',
-                  onPressed: () =>
-                      setState(() => _calendarVisible = !_calendarVisible),
-                ),
+                child: narrow
+                    ? IconButton(
+                        key: const ValueKey('nav-toggle'),
+                        visualDensity: VisualDensity.compact,
+                        icon: Icon(
+                          _navOpen
+                              ? Icons.calendar_month
+                              : Icons.calendar_today,
+                          color: kAccent,
+                        ),
+                        tooltip: 'Календарь и темы',
+                        onPressed: _toggleNav,
+                      )
+                    : IconButton(
+                        visualDensity: VisualDensity.compact,
+                        icon: Icon(
+                          _calendarVisible
+                              ? Icons.calendar_month
+                              : Icons.calendar_today,
+                          color: kAccent,
+                        ),
+                        tooltip: _calendarVisible
+                            ? 'Скрыть календарь'
+                            : 'Показать календарь',
+                        onPressed: () => setState(
+                            () => _calendarVisible = !_calendarVisible),
+                      ),
               ),
               PressScale(
                 child: IconButton(
@@ -3330,14 +3397,21 @@ class _CalendarPageState extends State<CalendarPage>
                       ? KeyedSubtree(
                           key: ValueKey('t:$_openTopicId'),
                           child: _topicHeader(_openTopicId!))
-                      : Text(
-                          _formatDate(_selectedDay),
+                      : LayoutBuilder(
                           key: ValueKey(_dayKey(_selectedDay)),
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: kAccentLight,
-                            fontSize: 17,
-                            fontWeight: FontWeight.w600,
+                          // совсем тесно (окно ~300) — без текущего года
+                          builder: (context, c) => Text(
+                            c.maxWidth < 125
+                                ? formatHeaderDate(_selectedDay,
+                                    short: true, now: DateTime.now())
+                                : _formatDate(_selectedDay),
+                            overflow: TextOverflow.ellipsis,
+                            maxLines: 1,
+                            style: TextStyle(
+                              color: kAccentLight,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                         ),
                 ),
@@ -3345,8 +3419,9 @@ class _CalendarPageState extends State<CalendarPage>
               PressScale(child: _appMenu()),
             ],
           ),
-          const SizedBox(height: 14),
-          // панель форматирования — по кнопке в шапке (по умолчанию скрыта)
+          SizedBox(height: narrow ? 10 : 14),
+          // панель форматирования — по кнопке в шапке (по умолчанию скрыта);
+          // в узком окне — одна строка с прокруткой (не съедает высоту)
           CollapsibleToolbar(
             visible: _toolbarVisible,
             child: Container(
@@ -3356,7 +3431,12 @@ class _CalendarPageState extends State<CalendarPage>
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(color: kDivider),
               ),
-              child: _toolbar(),
+              child: narrow
+                  ? SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: _toolbar(),
+                    )
+                  : _toolbar(),
             ),
           ),
           ValueListenableBuilder<bool>(
@@ -3463,62 +3543,17 @@ class _CalendarPageState extends State<CalendarPage>
     return Scaffold(
       backgroundColor: kBackground,
       body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final wide = constraints.maxWidth >= 800;
-
-            if (wide) {
-              return Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 1400),
-                  child: Padding(
-                    padding: const EdgeInsets.all(20),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        // Календарь слева: плавно меняется ширина, содержимое
-                        // своей ширины обрезается и тает (без переполнения)
-                        CollapseReveal(
-                          open: _calendarVisible,
-                          child: SizedBox(
-                            width: 320,
-                            child: Padding(
-                              padding: const EdgeInsets.only(right: 20),
-                              child: _leftColumn(),
-                            ),
-                          ),
-                        ),
-                        // Заметка посередине
-                        Expanded(child: _notePanel()),
-                      ],
-                    ),
-                  ),
-                ),
-              );
-            }
-
-            // Узкий экран (телефон): календарь сверху, заметка ниже
-            return ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                CollapseReveal(
-                  open: _calendarVisible,
-                  axis: Axis.vertical,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _calendarPanel(),
-                      const SizedBox(height: 16),
-                      SizedBox(height: 300, child: _topicsPanel()),
-                      const SizedBox(height: 16),
-                    ],
-                  ),
-                ),
-                SizedBox(height: 560, child: _notePanel()),
-              ],
-            );
-          },
+        // одно дерево на все ширины (lib/responsive_layout.dart): узкое окно —
+        // заметка на всю страницу, календарь и темы — выезжающая панель
+        child: ResponsiveShell(
+          leftColumn: (_) => _leftColumn(),
+          notePanel: (_, narrow) => _notePanel(narrow: narrow),
+          wideColumnOpen: _calendarVisible,
+          overlayOpen: _navOpen,
+          onCloseOverlay: _closeNav,
+          scrimColor: kBackground.withValues(alpha: 0.72),
+          overlayColor: kBackground,
+          overlayBorderColor: kDivider,
         ),
       ),
     );

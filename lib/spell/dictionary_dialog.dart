@@ -59,12 +59,17 @@ class _DictionaryDialogState extends State<_DictionaryDialog> {
         children: [
           Icon(Icons.spellcheck, color: kAccent),
           SizedBox(width: 10),
-          Text('Личный словарь'),
+          // узкое окно — заголовок сжимается с многоточием
+          Flexible(
+            child: Text('Личный словарь',
+                maxLines: 1, overflow: TextOverflow.ellipsis),
+          ),
         ],
       ),
       content: SizedBox(
         width: 380,
-        height: 420,
+        // низкое окно (телефон боком) — список короче, окно помещается
+        height: (MediaQuery.sizeOf(context).height - 220).clamp(160.0, 420.0),
         child: ListenableBuilder(
           listenable: widget.dictionary,
           builder: (context, _) {
