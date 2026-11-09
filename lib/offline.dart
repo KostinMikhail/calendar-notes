@@ -100,6 +100,33 @@ bool get browserSaysOffline => web.browserOnline() == false;
 /// Просить подтверждение при закрытии вкладки
 void setLeaveGuard(bool on) => web.setLeaveGuard(on);
 
+/// [hook] вызывается при закрытии или перезагрузке вкладки — до того, как
+/// браузер решит, спрашивать ли «Покинуть сайт?»
+void setBeforeUnloadHook(void Function()? hook) =>
+    web.setBeforeUnloadHook(hook);
+
+/// Сколько после постановки записи в очередь её считаем «свежей»: Firestore
+/// кладёт очередь в IndexedDB асинхронно, и закрытие вкладки в этот момент
+/// может её потерять
+const Duration kFreshWriteWindow = Duration(seconds: 1);
+
+/// Спрашивать ли браузером «Покинуть сайт?» при закрытии вкладки:
+/// • [dirty] — в редакторе правки, ещё не поставленные в очередь;
+/// • [freshWrite] — запись только что ушла в очередь (≤ [kFreshWriteWindow]);
+/// • [tooBig] — заметка не сохраняется из-за размера, текст только в памяти;
+/// • без локальной копии на диске ([cacheLimited]) — всё, что не дошло до
+///   сервера ([unsynced]).
+/// С локальной копией очередь, уже лежащая в IndexedDB, переживает закрытие
+/// вкладки — по ней не спрашиваем.
+bool needsLeaveGuard({
+  required bool dirty,
+  required bool freshWrite,
+  required bool tooBig,
+  required bool cacheLimited,
+  required bool unsynced,
+}) =>
+    dirty || freshWrite || tooBig || (cacheLimited && unsynced);
+
 // ============================================================
 //  Есть ли связь
 // ============================================================

@@ -166,6 +166,61 @@ void main() {
     });
   });
 
+  group('вопрос при закрытии вкладки (needsLeaveGuard)', () {
+    bool g({
+      bool dirty = false,
+      bool fresh = false,
+      bool tooBig = false,
+      bool limited = false,
+      bool unsynced = false,
+    }) =>
+        needsLeaveGuard(
+            dirty: dirty,
+            freshWrite: fresh,
+            tooBig: tooBig,
+            cacheLimited: limited,
+            unsynced: unsynced);
+
+    test('всё сохранено — не спрашиваем', () {
+      expect(g(), isFalse);
+    });
+
+    test('правки ещё не в очереди — спрашиваем, даже с копией на диске', () {
+      expect(g(dirty: true), isTrue);
+    });
+
+    test('запись только что ушла в очередь — спрашиваем', () {
+      expect(g(fresh: true), isTrue);
+    });
+
+    test('слишком большая заметка — спрашиваем', () {
+      expect(g(tooBig: true), isTrue);
+    });
+
+    test('с копией на диске очередь без сети — не спрашиваем', () {
+      expect(g(unsynced: true), isFalse);
+    });
+
+    test('без копии на диске не дошедшее до сервера — спрашиваем', () {
+      expect(g(limited: true, unsynced: true), isTrue);
+      expect(g(limited: true), isFalse);
+    });
+
+    test('окно «свежей» записи короткое', () {
+      expect(kFreshWriteWindow, lessThanOrEqualTo(const Duration(seconds: 2)));
+      expect(kFreshWriteWindow, greaterThan(Duration.zero));
+    });
+
+    test('не в браузере хук и защита ничего не делают', () {
+      var calls = 0;
+      setBeforeUnloadHook(() => calls++);
+      setLeaveGuard(true);
+      setLeaveGuard(false);
+      setBeforeUnloadHook(null);
+      expect(calls, 0);
+    });
+  });
+
   group('SaveTracker', () {
     test('ответ вовремя — acked, ничего не висит', () async {
       final t = SaveTracker(ackWait: _short);

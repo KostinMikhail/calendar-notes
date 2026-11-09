@@ -15,4 +15,6 @@ void writeLocal(String key, String value) => _memory[key] = value;
 
 void setLeaveGuard(bool on) {}
 
+void setBeforeUnloadHook(void Function()? hook) {}
+
 void setBrowserChrome({required String favicon, required String color}) {}

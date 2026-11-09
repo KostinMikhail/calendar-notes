@@ -112,22 +112,38 @@ void writeLocal(String key, String value) {
 
 bool _leaveGuard = false;
 bool _leaveListener = false;
+void Function()? _beforeUnload;
 
-/// Спрашивать браузером «Покинуть сайт?» при закрытии вкладки
-void setLeaveGuard(bool on) {
-  _leaveGuard = on;
-  if (!on || _leaveListener) return;
+void _listenBeforeUnload() {
+  if (_leaveListener) return;
   _leaveListener = true;
   try {
     _addEventListener(
         'beforeunload',
         ((JSObject e) {
+          // сначала дать странице сохранить (поставить запись в очередь) —
+          // хук может включить защиту
+          try {
+            _beforeUnload?.call();
+          } catch (_) {}
           if (!_leaveGuard) return;
           final ev = _Event(e);
           ev.preventDefault();
           ev.returnValue = ''.toJS;
         }).toJS);
   } catch (_) {}
+}
+
+/// Спрашивать браузером «Покинуть сайт?» при закрытии вкладки
+void setLeaveGuard(bool on) {
+  _leaveGuard = on;
+  if (on) _listenBeforeUnload();
+}
+
+/// Вызывается при закрытии/перезагрузке вкладки до решения о вопросе
+void setBeforeUnloadHook(void Function()? hook) {
+  _beforeUnload = hook;
+  if (hook != null) _listenBeforeUnload();
 }
 
 // ---------- оформление: значок вкладки, цвет вкладки, фон страницы ----------

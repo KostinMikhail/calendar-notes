@@ -1037,6 +1037,8 @@ class _CalendarPageState extends State<CalendarPage>
     _topics.load();
     // автосохранение каждые 5 секунд, если есть несохранённые правки
     _autoTimer = Timer.periodic(const Duration(seconds: 5), (_) => _autoSave());
+    // закрытие/перезагрузка вкладки: сразу ставим правки в очередь
+    setBeforeUnloadHook(_onBeforeUnload);
   }
 
   @override
@@ -1053,6 +1055,8 @@ class _CalendarPageState extends State<CalendarPage>
     _noteHidden.dispose();
     _loadError.dispose();
     _spell.dispose();
+    setBeforeUnloadHook(null);
+    _freshTimer?.cancel();
     setLeaveGuard(false);
     HardwareKeyboard.instance.removeHandler(_onGlobalKey);
     WidgetsBinding.instance.removeObserver(this);
@@ -1944,6 +1948,7 @@ class _CalendarPageState extends State<CalendarPage>
     _watchNote(key);
     if (rejected != null) {
       _lastSavedJson = _rejectedMark; // автосохранение повторит запись
+      _updateLeaveGuard();
       _setStatus(_saveErrorText(rejected.error));
     }
     // без сервера и без локальной копии этого дня — предупреждение
@@ -2064,6 +2069,7 @@ class _CalendarPageState extends State<CalendarPage>
     _setStatus('');
     if (rejected != null) {
       _lastSavedJson = _rejectedMark; // автосохранение повторит запись
+      _updateLeaveGuard();
       _setStatus(_saveErrorText(rejected.error));
     }
 
@@ -2080,9 +2086,51 @@ class _CalendarPageState extends State<CalendarPage>
     if (_loadedKey != key) {
       // заметка так и не загрузилась (например, нет доступа) — пробуем снова
       if (!_loadingNow) _loadTarget();
+      _updateLeaveGuard();
       return;
     }
     if (_isDirty) _saveNote();
+    _updateLeaveGuard();
+  }
+
+  /// Запись только что ушла в очередь: какое-то время она ещё может не
+  /// лежать на диске — закрытие вкладки спросит подтверждение
+  bool _freshWrite = false;
+  Timer? _freshTimer;
+
+  void _markFreshWrite() {
+    _freshWrite = true;
+    _freshTimer?.cancel();
+    _freshTimer = Timer(kFreshWriteWindow, () {
+      _freshWrite = false;
+      _updateLeaveGuard();
+    });
+    _updateLeaveGuard();
+  }
+
+  /// Включает или снимает вопрос браузера «Покинуть сайт?» ([json] —
+  /// текущее содержимое редактора, если уже посчитано)
+  void _updateLeaveGuard([String? json]) {
+    if (!mounted) return;
+    final editing =
+        !_signingOut && _loadedKey != null && _loadedKey == _targetKey;
+    final dirty = editing && (json ?? _currentJson()) != _lastSavedJson;
+    setLeaveGuard(needsLeaveGuard(
+      dirty: dirty,
+      freshWrite: _freshWrite,
+      tooBig: _saves.hasTooBig,
+      cacheLimited: offlineCacheLimited,
+      unsynced: _saves.hasUnsynced,
+    ));
+  }
+
+  /// Вкладку закрывают или перезагружают: правки — в очередь сейчас же,
+  /// не дожидаясь автосохранения. Пока браузер спрашивает «Покинуть
+  /// сайт?», запись успевает лечь на диск.
+  void _onBeforeUnload() {
+    if (!mounted || _backupBusy || _signingOut) return;
+    if (_loadedKey == _targetKey && _isDirty) unawaited(_saveNote());
+    _updateLeaveGuard();
   }
 
   /// Сохранение открытой заметки. Запись ставится в очередь Firestore
@@ -2134,6 +2182,7 @@ class _CalendarPageState extends State<CalendarPage>
     }
     // запись в очереди (в локальной копии): эти правки уже сохранены
     _lastSavedJson = json;
+    _markFreshWrite();
     // сократили — удержанный из-за размера текст больше не нужен
     if (_saves.rejected(key)?.error is NoteTooBigError) _saves.forget(key);
     if (topicId != null) {
@@ -2267,10 +2316,9 @@ class _CalendarPageState extends State<CalendarPage>
     if (!_saves.hasPending && _status.value == kStatusQueued) {
       _setStatus(kStatusSaved);
     }
-    // копия только в памяти вкладки: закрытие вкладки потеряло бы очередь
-    // а слишком большая заметка не сохранена совсем — её текст только здесь
-    setLeaveGuard(
-        (offlineCacheLimited && _saves.hasUnsynced) || _saves.hasTooBig);
+    // копия только в памяти вкладки: закрытие вкладки потеряло бы очередь;
+    // слишком большая заметка не сохранена совсем — её текст только здесь
+    _updateLeaveGuard();
   }
 
   String _saveErrorText(Object e) => e is NoteTooBigError
@@ -2970,6 +3018,7 @@ class _CalendarPageState extends State<CalendarPage>
     final json = _currentJson();
     if (json == _lastSeenJson) return; // просто движение курсора
     _lastSeenJson = json;
+    _updateLeaveGuard(json);
 
     final len = _controller.document.length;
     final grew = len > _lastLen;
