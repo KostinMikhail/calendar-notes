@@ -2062,6 +2062,7 @@ class _CalendarPageState extends State<CalendarPage>
     _setLoadedKey(key);
     _revealIfNew(key);
     _setStatus('');
+    _watchNote(key);
     if (rejected != null) {
       _lastSavedJson = _rejectedMark; // автосохранение повторит запись
       _updateLeaveGuard();
@@ -2449,16 +2450,20 @@ class _CalendarPageState extends State<CalendarPage>
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _noteSub;
   String? _noteSubKey;
 
+  /// Следит за открытой заметкой (днём или темой) в базе: правки из
+  /// другой вкладки или с другого устройства появляются в редакторе
   void _watchNote(String key) {
     if (_noteSubKey == key && _noteSub != null) return;
     _unwatchNote();
-    final notes = _notes;
-    if (notes == null) return;
+    final topicId = topicIdOf(key);
+    final ref =
+        topicId != null ? _topicsRef?.doc(topicId) : _notes?.doc(key);
+    if (ref == null) return;
     _noteSubKey = key;
     // с изменениями метаданных: ответ сервера после связи приходит и
     // тогда, когда содержимое не изменилось (снимает предупреждение
     // «неизвестный день»)
-    _noteSub = notes.doc(key).snapshots(includeMetadataChanges: true).listen(
+    _noteSub = ref.snapshots(includeMetadataChanges: true).listen(
           (snap) {
             if (!snap.metadata.isFromCache && key == _loadedKey) {
               _unknownDay.value = false;
@@ -2478,7 +2483,10 @@ class _CalendarPageState extends State<CalendarPage>
   void _onRemoteNote(
       String key, DocumentSnapshot<Map<String, dynamic>> snap) {
     if (!mounted || _signingOut || snap.metadata.hasPendingWrites) return;
-    if (_loadedKey != key || _targetKey != key || !_docIsDay) return;
+    final topicId = topicIdOf(key);
+    // в редакторе именно эта заметка (день — днём, тема — темой)
+    if (_loadedKey != key || _targetKey != key) return;
+    if (_docIsDay != (topicId == null)) return;
     // своя запись ещё не подтверждена или отклонена: снимок из базы может
     // быть откатом — он не должен стереть текст в редакторе
     if (_saves.isUnsettled(key)) return;
@@ -2531,9 +2539,14 @@ class _CalendarPageState extends State<CalendarPage>
     _lastSavedJson = remoteJson;
     _lastSeenJson = _currentJson();
     _lastLen = _controller.document.length;
-    final accent = data['accent'];
-    if (accent is String && accent.isNotEmpty) _accent = accent;
-    _searchCache.put(key, (data['text'] ?? '').toString());
+    final text = (data['text'] ?? '').toString();
+    if (topicId != null) {
+      _searchCache.putTopicText(topicId, text);
+    } else {
+      final accent = data['accent'];
+      if (accent is String && accent.isNotEmpty) _accent = accent;
+      _searchCache.put(key, text);
+    }
     _setStatus('Обновлено из другой вкладки');
   }
 
