@@ -41,6 +41,7 @@ class SpellEngine extends ChangeNotifier {
     required this.dictionary,
     this.pref = const SpellPref(),
     this.startDelay = const Duration(seconds: 3),
+    this.requestTimeout = const Duration(seconds: 10),
   }) : _enabled = pref.load() {
     dictionary.addListener(_onDictionary);
   }
@@ -52,6 +53,10 @@ class SpellEngine extends ChangeNotifier {
   /// Загрузка словарей — не сразу при входе, чтобы не мешать первой
   /// загрузке заметки
   final Duration startDelay;
+
+  /// Сколько ждать ответа словаря на один запрос (аудит, F12): завис —
+  /// подчёркиваний нет, вариантов нет, меню не висит на «Поиск вариантов…»
+  final Duration requestTimeout;
 
   bool _enabled;
   SpellState _state = SpellState.idle;
@@ -135,7 +140,8 @@ class SpellEngine extends ChangeNotifier {
       final words = e.value.toList();
       for (var i = 0; i < words.length; i += 400) {
         final part = words.skip(i).take(400).toList();
-        final res = await backend.check(e.key, part);
+        final res =
+            await backend.check(e.key, part).timeout(requestTimeout);
         for (var j = 0; j < part.length && j < res.length; j++) {
           _verdicts['${e.key}:${part[j]}'] = res[j];
         }
@@ -147,7 +153,9 @@ class SpellEngine extends ChangeNotifier {
   Future<List<String>> suggestions(SpellToken t) async {
     if (!active) return const [];
     try {
-      final raw = await backend.suggest(t.lang, _dictForm(t.word));
+      final raw = await backend
+          .suggest(t.lang, _dictForm(t.word))
+          .timeout(requestTimeout);
       return rankSuggestions(t.word, raw);
     } catch (_) {
       return const [];

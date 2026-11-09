@@ -54,8 +54,8 @@ class _WorkerBackend implements SpellBackend {
       _failAll(StateError('spell worker error'));
     }).toJS;
     // словари: английский (быстро), затем русский (~2–3 с)
-    await _send({'type': 'init', 'base': '', 'langs': ['en', 'ru']})
-        .timeout(const Duration(seconds: 90));
+    await _send({'type': 'init', 'base': '', 'langs': ['en', 'ru']},
+        timeout: const Duration(seconds: 90));
   }
 
   void _failAll(Object e) {
@@ -66,14 +66,20 @@ class _WorkerBackend implements SpellBackend {
     }
   }
 
-  Future<Map<String, dynamic>> _send(Map<String, dynamic> msg) {
+  /// Запрос воркеру. Не ответил за [timeout] — ошибка, и запрос больше
+  /// не ждём (иначе зависший воркер копил бы ожидания)
+  Future<Map<String, dynamic>> _send(Map<String, dynamic> msg,
+      {Duration timeout = const Duration(seconds: 15)}) {
     final w = _worker;
     if (w == null) return Future.error(StateError('not started'));
     final id = ++_nextId;
     final c = Completer<Map<String, dynamic>>();
     _pending[id] = c;
     w.postMessage(jsonEncode({...msg, 'id': id}).toJS);
-    return c.future;
+    return c.future.timeout(timeout, onTimeout: () {
+      _pending.remove(id);
+      throw TimeoutException('spell worker', timeout);
+    });
   }
 
   @override

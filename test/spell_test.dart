@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:calendar_notes/backup.dart';
@@ -687,4 +688,59 @@ void main() {
       expect(menuOpen.value, isFalse);
     });
   });
+
+  group('зависший словарь (аудит, F12)', () {
+    SpellEngine hungEngine(HungBackend b) => SpellEngine(
+          backend: b,
+          dictionary: PersonalDictionary(MemDictStore()),
+          pref: SpellPref(MemPrefs()),
+          startDelay: Duration.zero,
+          requestTimeout: const Duration(milliseconds: 50),
+        );
+
+    test('варианты не приходят — пустой список, меню не висит', () async {
+      final e = hungEngine(HungBackend());
+      e.start();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      expect(e.active, isTrue);
+      final clock = Stopwatch()..start();
+      final list = await e.suggestions(spellTokens('превет').single);
+      expect(list, isEmpty);
+      expect(clock.elapsedMilliseconds, lessThan(2000));
+      e.dispose();
+    });
+
+    test('проверка не приходит — ошибка (подчеркнём при следующей правке)',
+        () async {
+      final e = hungEngine(HungBackend());
+      e.start();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      await expectLater(e.checkTokens(spellTokens('превет мир')),
+          throwsA(isA<TimeoutException>()));
+      e.dispose();
+    });
+
+    test('по умолчанию ждём 10 с', () {
+      final e = engineWith(FakeBackend());
+      expect(e.requestTimeout, const Duration(seconds: 10));
+      e.dispose();
+    });
+  });
+}
+
+/// Словарь загрузился, но на запросы не отвечает
+class HungBackend implements SpellBackend {
+  @override
+  Future<void> start() async {}
+
+  @override
+  Future<List<bool>> check(String lang, List<String> words) =>
+      Completer<List<bool>>().future;
+
+  @override
+  Future<List<String>> suggest(String lang, String word) =>
+      Completer<List<String>>().future;
+
+  @override
+  void dispose() {}
 }

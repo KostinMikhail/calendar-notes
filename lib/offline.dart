@@ -90,9 +90,19 @@ Future<bool> configureFirestoreCache(FirebaseFirestore db) async {
   return ok;
 }
 
-/// Браузер: события online/offline (для быстрого значка «Офлайн»)
-void listenBrowserOnline(void Function(bool online) callback) =>
+/// Браузер: события online/offline (для быстрого значка «Офлайн»).
+/// Слушатель один на страницу: новый вызов заменяет прежний, null — снять.
+void listenBrowserOnline(void Function(bool online)? callback) =>
     web.onBrowserOnlineChanged(callback);
+
+/// Пауза перед [failures]-м автоматическим повтором загрузки заметки:
+/// 5, 10, 20, 40 с, дальше раз в минуту (аудит, F10). Кнопка «Повторить»
+/// не ждёт.
+Duration loadRetryDelay(int failures) {
+  if (failures <= 1) return const Duration(seconds: 5);
+  if (failures >= 5) return const Duration(seconds: 60);
+  return Duration(seconds: 5 << (failures - 1));
+}
 
 /// Браузер считает, что сети нет
 bool get browserSaysOffline => web.browserOnline() == false;

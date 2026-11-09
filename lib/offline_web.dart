@@ -88,12 +88,23 @@ bool? browserOnline() {
   }
 }
 
-/// События браузера online / offline
-void onBrowserOnlineChanged(void Function(bool online) callback) {
+void Function(bool online)? _onlineCallback;
+bool _onlineListening = false;
+
+/// События браузера online / offline. Слушатели окна ставятся один раз;
+/// новый вызов заменяет получателя, null — снимает его.
+void onBrowserOnlineChanged(void Function(bool online)? callback) {
+  _onlineCallback = callback;
+  if (callback == null || _onlineListening) return;
+  _onlineListening = true;
   try {
-    _addEventListener('online', ((JSAny _) => callback(true)).toJS);
-    _addEventListener('offline', ((JSAny _) => callback(false)).toJS);
-  } catch (_) {}
+    _addEventListener(
+        'online', ((JSAny _) => _onlineCallback?.call(true)).toJS);
+    _addEventListener(
+        'offline', ((JSAny _) => _onlineCallback?.call(false)).toJS);
+  } catch (_) {
+    _onlineListening = false;
+  }
 }
 
 String? readLocal(String key) {

@@ -5,7 +5,7 @@ Future<bool> storageAvailable() async => true;
 
 bool? browserOnline() => null;
 
-void onBrowserOnlineChanged(void Function(bool online) callback) {}
+void onBrowserOnlineChanged(void Function(bool online)? callback) {}
 
 final Map<String, String> _memory = {};
 

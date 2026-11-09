@@ -900,8 +900,8 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
     );
     final rawUrl = urlCtrl.text.trim();
     final label = textCtrl.text.trim();
-    urlCtrl.dispose();
-    textCtrl.dispose();
+    // urlCtrl/textCtrl не освобождаем: поля ещё видны во время анимации
+    // закрытия окна (как в окне названия темы)
     if (ok != true || !mounted) {
       _ef.requestFocus();
       return;

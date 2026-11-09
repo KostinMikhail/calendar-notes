@@ -741,4 +741,33 @@ void main() {
       }
     });
   });
+
+  group('пауза между повторами загрузки (аудит, F10)', () {
+    test('5, 10, 20, 40 с, дальше раз в минуту', () {
+      expect(
+          [for (var i = 1; i <= 7; i++) loadRetryDelay(i).inSeconds],
+          [5, 10, 20, 40, 60, 60, 60]);
+    });
+
+    test('первый повтор — как раньше, через 5 с', () {
+      expect(loadRetryDelay(0), const Duration(seconds: 5));
+      expect(loadRetryDelay(1), const Duration(seconds: 5));
+    });
+
+    test('пауза не убывает и не больше минуты', () {
+      var prev = Duration.zero;
+      for (var i = 1; i < 50; i++) {
+        final d = loadRetryDelay(i);
+        expect(d, greaterThanOrEqualTo(prev));
+        expect(d, lessThanOrEqualTo(const Duration(minutes: 1)));
+        prev = d;
+      }
+    });
+
+    test('не в браузере слушатель сети можно ставить и снимать', () {
+      listenBrowserOnline((_) {});
+      listenBrowserOnline((_) {});
+      listenBrowserOnline(null);
+    });
+  });
 }

@@ -897,9 +897,23 @@ class _CalendarPageState extends State<CalendarPage>
   void _failLoad(String message) {
     _noteHidden.value = true;
     _loadError.value = message;
+    // повторяем всё реже: 5, 10, 20, 40 с, дальше раз в минуту
+    final key = _targetKey;
+    if (_loadFailKey != key) {
+      _loadFailKey = key;
+      _loadFailures = 0;
+    }
+    _loadFailures++;
+    _nextLoadRetry = DateTime.now().add(loadRetryDelay(_loadFailures));
   }
 
-  /// «Повторить» на плашке ошибки (автосохранение и так повторяет каждые 5 с)
+  /// Неудачные загрузки подряд для [_loadFailKey] и время следующего
+  /// автоматического повтора
+  String? _loadFailKey;
+  int _loadFailures = 0;
+  DateTime? _nextLoadRetry;
+
+  /// «Повторить» на плашке ошибки — сразу, без паузы автоматических повторов
   void _retryLoad() {
     if (_loadingNow) return;
     _loadError.value = null;
@@ -926,6 +940,9 @@ class _CalendarPageState extends State<CalendarPage>
   /// Новое содержимое уже в редакторе — проявить
   void _revealIfNew(String key) {
     _loadError.value = null;
+    _loadFailKey = null;
+    _loadFailures = 0;
+    _nextLoadRetry = null;
     if (key == _revealedKey && !_noteHidden.value) return;
     _revealedKey = key;
     _noteHidden.value = false;
@@ -1049,6 +1066,7 @@ class _CalendarPageState extends State<CalendarPage>
     _downloadStart?.cancel();
     _download.dispose();
     _saves.dispose();
+    listenBrowserOnline(null);
     _conn.dispose();
     _unknownDay.dispose();
     _revealSignal.dispose();
@@ -2080,8 +2098,13 @@ class _CalendarPageState extends State<CalendarPage>
     if (_backupBusy) return; // во время копии/восстановления — ничего не пишем
     final key = _targetKey;
     if (_loadedKey != key) {
-      // заметка так и не загрузилась (например, нет доступа) — пробуем снова
-      if (!_loadingNow) _loadTarget();
+      // заметка так и не загрузилась (например, нет доступа) — пробуем
+      // снова, но не чаще, чем позволяет пауза после ошибок
+      final wait = _nextLoadRetry;
+      final waiting = _loadFailKey == key &&
+          wait != null &&
+          DateTime.now().isBefore(wait);
+      if (!_loadingNow && !waiting) _loadTarget();
       _updateLeaveGuard();
       return;
     }
