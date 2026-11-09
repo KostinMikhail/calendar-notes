@@ -3,6 +3,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'motion.dart'
+    show FadeSwitcher, Motion, PressScale, SizeFade, showAppDialog;
 import 'main.dart'
     show
         kAccent,
@@ -15,7 +17,7 @@ import 'main.dart'
         kTextSecondary;
 import 'topics.dart';
 
-class TopicsPanel extends StatelessWidget {
+class TopicsPanel extends StatefulWidget {
   const TopicsPanel({
     super.key,
     required this.controller,
@@ -36,6 +38,93 @@ class TopicsPanel extends StatelessWidget {
 
   /// false — идёт копия/восстановление, действия недоступны
   final bool enabled;
+
+  @override
+  State<TopicsPanel> createState() => _TopicsPanelState();
+}
+
+/// Строка списка: живая тема или уходящая (удалена — только тает)
+class _Entry {
+  _Entry(this.topic, {this.leaving = false});
+  final Topic topic;
+  final bool leaving;
+}
+
+class _TopicsPanelState extends State<TopicsPanel> {
+  TopicsController get controller => widget.controller;
+  String? get selectedId => widget.selectedId;
+  ValueChanged<String> get onOpen => widget.onOpen;
+  VoidCallback get onCreate => widget.onCreate;
+  ValueChanged<String> get onRename => widget.onRename;
+  ValueChanged<String> get onDelete => widget.onDelete;
+  bool get enabled => widget.enabled;
+
+  /// Что показано в списке: темы контроллера и уходящие строки на своих
+  /// прежних местах. Данные меняются сразу (в контроллере), здесь — только
+  /// вид.
+  List<_Entry> _entries = const [];
+
+  /// Темы, появившиеся после первой загрузки — им анимация появления
+  final Set<String> _appearing = {};
+  bool _seeded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    controller.addListener(_sync);
+    _sync();
+  }
+
+  @override
+  void didUpdateWidget(TopicsPanel old) {
+    super.didUpdateWidget(old);
+    if (old.controller != widget.controller) {
+      old.controller.removeListener(_sync);
+      widget.controller.addListener(_sync);
+      _seeded = false;
+      _entries = const [];
+      _sync();
+    }
+  }
+
+  @override
+  void dispose() {
+    controller.removeListener(_sync);
+    super.dispose();
+  }
+
+  void _sync() {
+    final topics = controller.topics;
+    final ids = {for (final t in topics) t.id};
+    final merged = [for (final t in topics) _Entry(t)];
+    if (_seeded) {
+      final before = {for (final e in _entries) if (!e.leaving) e.topic.id};
+      for (final t in topics) {
+        if (!before.contains(t.id)) _appearing.add(t.id);
+      }
+      // удалённые (и ещё не дотаявшие) строки — на прежних местах
+      for (var i = 0; i < _entries.length; i++) {
+        final e = _entries[i];
+        if (ids.contains(e.topic.id)) continue;
+        merged.insert(
+            i.clamp(0, merged.length), _Entry(e.topic, leaving: true));
+      }
+    }
+    if (controller.loaded) _seeded = true;
+    _appearing.removeWhere((id) => !ids.contains(id));
+    if (mounted) {
+      setState(() => _entries = merged);
+    } else {
+      _entries = merged;
+    }
+  }
+
+  void _gone(_Entry e) {
+    if (!mounted) return;
+    setState(() => _entries = [for (final x in _entries) if (x != e) x]);
+  }
+
+  bool get _hasLeaving => _entries.any((e) => e.leaving);
 
   @override
   Widget build(BuildContext context) {
@@ -65,11 +154,14 @@ class TopicsPanel extends StatelessWidget {
                       ),
                     ),
                   ),
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    tooltip: 'Новая тема',
-                    icon: Icon(Icons.add, color: kAccent),
-                    onPressed: enabled ? onCreate : null,
+                  PressScale(
+                    enabled: enabled,
+                    child: IconButton(
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'Новая тема',
+                      icon: Icon(Icons.add, color: kAccent),
+                      onPressed: enabled ? onCreate : null,
+                    ),
                   ),
                 ],
               ),
@@ -109,7 +201,7 @@ class TopicsPanel extends StatelessWidget {
         ),
       );
     }
-    if (c.topics.isEmpty) {
+    if (_entries.isEmpty) {
       return Center(
         child: Padding(
           padding: EdgeInsets.all(16),
@@ -121,49 +213,84 @@ class TopicsPanel extends StatelessWidget {
         ),
       );
     }
-    final topics = c.topics;
+    final entries = _entries;
+    // пока удалённая строка тает (доли секунды), перетаскивание выключено:
+    // номера строк на экране и в списке тем ненадолго не совпадают
+    final canDrag = enabled && !_hasLeaving;
     return ReorderableListView.builder(
       // тянуть можно только за ручку — прокрутка не начинает перетаскивание
       buildDefaultDragHandles: false,
       padding: const EdgeInsets.symmetric(vertical: 6),
-      itemCount: topics.length,
+      itemCount: entries.length,
       onReorderItem: (oldIndex, newIndex) {
-        if (!enabled) return;
+        if (!canDrag) return;
         c.reorder(oldIndex, newIndex).catchError((_) {});
       },
-      proxyDecorator: (child, _, _) => Material(
-        color: kCard,
-        elevation: 4,
-        borderRadius: BorderRadius.circular(10),
+      // перетаскиваемая строка приподнимается и чуть увеличивается,
+      // соседи раздвигаются (встроенное поведение списка)
+      proxyDecorator: (child, _, animation) => AnimatedBuilder(
+        animation: animation,
+        builder: (context, child) {
+          final t = Motion.enter.transform(animation.value);
+          return Transform.scale(
+            scale: 1 + 0.02 * t,
+            child: Opacity(
+              opacity: 1 - 0.08 * t,
+              child: Material(
+                color: kCard,
+                elevation: 6 * t,
+                borderRadius: BorderRadius.circular(10),
+                child: child,
+              ),
+            ),
+          );
+        },
         child: child,
       ),
-      itemBuilder: (context, i) => _item(context, topics[i], i),
+      itemBuilder: (context, i) {
+        final e = entries[i];
+        if (e.leaving) {
+          return SizeFade.leave(
+            key: ValueKey('gone:${e.topic.id}'),
+            onGone: () => _gone(e),
+            child: _item(context, e.topic, i, dragEnabled: false),
+          );
+        }
+        return SizeFade.appear(
+          key: ValueKey(e.topic.id),
+          animate: _appearing.contains(e.topic.id),
+          child: _item(context, e.topic, i, dragEnabled: canDrag),
+        );
+      },
     );
   }
 
-  Widget _item(BuildContext context, Topic t, int index) {
+  Widget _item(BuildContext context, Topic t, int index,
+      {required bool dragEnabled}) {
     final selected = t.id == selectedId;
     return Padding(
-      key: ValueKey(t.id),
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
       child: Material(
+        // выбор темы — заливка и рамка перетекают
+        animationDuration: Motion.fast,
         color: selected ? kAccent.withValues(alpha: 0.16) : Colors.transparent,
         borderRadius: BorderRadius.circular(10),
         child: InkWell(
           borderRadius: BorderRadius.circular(10),
           onTap: enabled ? () => onOpen(t.id) : null,
-          child: Container(
+          child: AnimatedContainer(
+            duration: Motion.fast,
             height: 40,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(10),
               border: Border.all(
-                  color: selected ? kAccent : Colors.transparent),
+                  color: selected ? kAccent : kAccent.withValues(alpha: 0)),
             ),
             child: Row(
               children: [
                 ReorderableDragStartListener(
                   index: index,
-                  enabled: enabled,
+                  enabled: dragEnabled,
                   child: MouseRegion(
                     cursor: SystemMouseCursors.grab,
                     child: Padding(
@@ -174,13 +301,19 @@ class TopicsPanel extends StatelessWidget {
                   ),
                 ),
                 Expanded(
-                  child: Text(
-                    t.title,
-                    overflow: TextOverflow.ellipsis,
-                    maxLines: 1,
-                    style: TextStyle(
-                      color: selected ? kAccentLight : kTextPrimary,
-                      fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                  // переименование — быстрое перетекание названия
+                  child: FadeSwitcher(
+                    dy: 0,
+                    child: Text(
+                      t.title,
+                      key: ValueKey(t.title),
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
+                      style: TextStyle(
+                        color: selected ? kAccentLight : kTextPrimary,
+                        fontWeight:
+                            selected ? FontWeight.w600 : FontWeight.w400,
+                      ),
                     ),
                   ),
                 ),
@@ -188,6 +321,7 @@ class TopicsPanel extends StatelessWidget {
                   tooltip: 'Действия',
                   enabled: enabled,
                   color: kCard,
+                  popUpAnimationStyle: Motion.menu,
                   icon: Icon(Icons.more_vert,
                       size: 18, color: kTextSecondary),
                   onSelected: (v) {
@@ -235,7 +369,7 @@ Future<String?> showTopicTitleDialog(
 }) async {
   final ctrl = TextEditingController(text: initial)
     ..selection = TextSelection(baseOffset: 0, extentOffset: initial.length);
-  final result = await showDialog<String>(
+  final result = await showAppDialog<String>(
     context: context,
     builder: (ctx) {
       void submit() => Navigator.pop(ctx, normalizeTopicTitle(ctrl.text));
@@ -275,7 +409,7 @@ Future<String?> showTopicTitleDialog(
 
 /// Подтверждение удаления темы
 Future<bool> confirmTopicDelete(BuildContext context, String title) async {
-  final ok = await showDialog<bool>(
+  final ok = await showAppDialog<bool>(
     context: context,
     builder: (ctx) => AlertDialog(
       backgroundColor: kSurface,

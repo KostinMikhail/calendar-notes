@@ -24,6 +24,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 import 'package:flutter_quill/quill_delta.dart';
 
+import 'motion.dart' show FadeSwitcher, Motion;
 import 'skins.dart' show currentSkin;
 import 'templates.dart'
     show TemplateComposition, TemplateLine, kTasksTitle, linesToOps, opsToLines;
@@ -1012,7 +1013,12 @@ class TaskControls extends StatelessWidget {
         height: 24,
         child: Row(
           children: [
-            crossDisabled && !inert ? Opacity(opacity: 0.35, child: cross) : cross,
+            // нет связи — ✗ плавно приглушается
+            AnimatedOpacity(
+              opacity: crossDisabled && !inert ? 0.35 : 1,
+              duration: Motion.fast,
+              child: cross,
+            ),
             _TaskBox(
               color: kTaskCheckColor,
               icon: Icons.check_rounded,
@@ -1046,32 +1052,47 @@ class _TaskBox extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final box = Container(
-      width: 16,
-      height: 16,
-      decoration: BoxDecoration(
-        color: active ? color : Colors.transparent,
-        borderRadius: BorderRadius.circular(4),
-        border: Border.all(
-          color: active ? color : color.withValues(alpha: 0.6),
-          width: 1.5,
+    final bg = currentSkin.value.background;
+    // нажали — заливка и значок плавно меняются, значок чуть «впрыгивает»;
+    // «идёт перенос» — значок и индикатор сменяют друг друга затуханием
+    final box = TweenAnimationBuilder<double>(
+      tween: Tween(end: active ? 1 : 0),
+      duration: Motion.fast,
+      curve: Motion.enter,
+      builder: (context, t, _) => Container(
+        width: 16,
+        height: 16,
+        decoration: BoxDecoration(
+          color: Color.lerp(color.withValues(alpha: 0), color, t),
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(
+            color: Color.lerp(color.withValues(alpha: 0.6), color, t)!,
+            width: 1.5,
+          ),
+        ),
+        child: FadeSwitcher(
+          alignment: Alignment.center,
+          dy: 0,
+          child: busy
+              ? Padding(
+                  key: const ValueKey('busy'),
+                  padding: const EdgeInsets.all(2.5),
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.5,
+                    color: active ? bg : color,
+                  ),
+                )
+              : Transform.scale(
+                  key: const ValueKey('icon'),
+                  scale: active ? 0.8 + 0.2 * t : 1,
+                  child: Icon(
+                    icon,
+                    size: 12,
+                    color: Color.lerp(color.withValues(alpha: 0.7), bg, t),
+                  ),
+                ),
         ),
       ),
-      child: busy
-          ? Padding(
-              padding: const EdgeInsets.all(2.5),
-              child: CircularProgressIndicator(
-                strokeWidth: 1.5,
-                color: active ? currentSkin.value.background : color,
-              ),
-            )
-          : Icon(
-              icon,
-              size: 12,
-              color: active
-                  ? currentSkin.value.background
-                  : color.withValues(alpha: 0.7),
-            ),
     );
     Widget hit = SizedBox(
       width: kTaskHitWidth,

@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 
+import 'motion.dart' show FadeScaleIn, Motion;
 import 'main.dart'
     show kAccent, kAccentLight, kDivider, kGreen, kRed, kSurface,
         kTextSecondary, kYellow;
@@ -180,8 +181,8 @@ class CollapsibleToolbar extends StatelessWidget {
   Widget build(BuildContext context) {
     return ClipRect(
       child: AnimatedSize(
-        duration: const Duration(milliseconds: 180),
-        curve: Curves.easeOut,
+        duration: Motion.normal,
+        curve: Motion.move,
         alignment: Alignment.topCenter,
         child: visible
             ? Padding(padding: EdgeInsets.only(bottom: gap), child: child)
@@ -433,13 +434,20 @@ class _FormatMenuHostState extends State<FormatMenuHost>
         Positioned(
           left: local.dx,
           top: local.dy,
-          // нажатия по меню — «внутри редактора»: фокус не снимается
-          child: Listener(
-            onPointerDown: (e) => _menuPointer = e.pointer,
-            child: TextFieldTapRegion(
-              child: ListenableBuilder(
-                listenable: _c,
-                builder: (context, _) => _bubble(),
+          // нажатия по меню — «внутри редактора»: фокус не снимается.
+          // Меню мягко появляется; за выделением следует сразу (позиция
+          // не анимируется)
+          child: FadeScaleIn(
+            duration: Motion.fast,
+            scaleFrom: 0.96,
+            alignment: Alignment.bottomCenter,
+            child: Listener(
+              onPointerDown: (e) => _menuPointer = e.pointer,
+              child: TextFieldTapRegion(
+                child: ListenableBuilder(
+                  listenable: _c,
+                  builder: (context, _) => _bubble(),
+                ),
               ),
             ),
           ),
@@ -558,15 +566,19 @@ class _MenuButton extends StatelessWidget {
               onPressed();
             }
           },
-          child: Container(
+          child: AnimatedContainer(
+            duration: Motion.fast, // включение/выключение — плавно
+            curve: Motion.enter,
             width: _kBtn,
             height: _kBtn,
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              color: active ? kAccent.withValues(alpha: 0.2) : Colors.transparent,
+              color: active
+                  ? kAccent.withValues(alpha: 0.2)
+                  : kAccent.withValues(alpha: 0),
               borderRadius: BorderRadius.circular(7),
               border: Border.all(
-                  color: active ? kAccent : Colors.transparent),
+                  color: active ? kAccent : kAccent.withValues(alpha: 0)),
             ),
             child: child,
           ),

@@ -19,6 +19,7 @@ import 'main.dart'
         kTextPrimary,
         kTextSecondary,
         kWeekdaysShort;
+import 'motion.dart' show FadeScaleIn, Motion, showAppDialog;
 import 'offline.dart' show kSearchLocalHint;
 import 'search.dart';
 import 'topics.dart' show Topic, topicIdOf, topicKey;
@@ -136,9 +137,10 @@ Future<SearchPick?> showNoteSearch(
   List<Topic> Function()? topics,
   bool Function()? localCopy,
 }) {
-  return showDialog<SearchPick>(
+  return showAppDialog<SearchPick>(
     context: context,
     barrierDismissible: true,
+    slide: true, // поиск — затухание и небольшой сдвиг вверх
     builder: (_) => NoteSearchDialog(
       cache: cache,
       boilerplate: boilerplate,
@@ -315,7 +317,7 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
     final ctx = _rowKeys[next].currentContext;
     if (ctx != null) {
       Scrollable.ensureVisible(ctx,
-          duration: const Duration(milliseconds: 120),
+          duration: Motion.fast,
           alignmentPolicy: step > 0
               ? ScrollPositionAlignmentPolicy.keepVisibleAtEnd
               : ScrollPositionAlignmentPolicy.keepVisibleAtStart);
@@ -489,8 +491,9 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
   Widget _topicRow(int i) {
     final hit = _topicHits[i];
     final active = i == _active;
-    final row = Container(
+    final row = AnimatedContainer(
       key: _rowKeys[i],
+      duration: Motion.fast, // подсветка строки перетекает
       margin: const EdgeInsets.only(bottom: 4),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
@@ -530,8 +533,9 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
     final hit = _hits[i - _topicCount];
     final enabled = _enabled(i);
     final active = enabled && i == _active;
-    final row = Container(
+    final row = AnimatedContainer(
       key: _rowKeys[i],
+      duration: Motion.fast, // подсветка строки перетекает
       margin: const EdgeInsets.only(bottom: 4),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
@@ -644,7 +648,16 @@ class _NoteSearchDialogState extends State<NoteSearchDialog> {
         shrinkWrap: true,
         itemCount: shown + (_total > shown ? 1 : 0),
         itemBuilder: (_, i) {
-          if (i < shown) return _row(i);
+          // новые результаты мягко проявляются, первые строки — лесенкой
+          // (шаг 20 мс, не больше нескольких строк)
+          if (i < shown) {
+            return FadeScaleIn(
+              key: ObjectKey(_rowKeys[i]),
+              duration: Motion.fast,
+              delay: Motion.stagger(i),
+              child: _row(i),
+            );
+          }
           return Padding(
             padding: const EdgeInsets.symmetric(vertical: 10),
             child: Text(

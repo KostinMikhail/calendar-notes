@@ -4,13 +4,14 @@ import 'package:flutter/material.dart';
 import '../main.dart'
     show kAccent, kBackground, kCard, kDivider, kSurface, kTextPrimary,
         kTextSecondary;
+import '../motion.dart' show showAppDialog;
 import 'personal_dictionary.dart';
 import 'tokenizer.dart' show normalizeWord;
 
 Future<void> showPersonalDictionaryDialog(
     BuildContext context, PersonalDictionary dictionary) {
   dictionary.load(); // словарь мог быть не загружен (проверка выключена)
-  return showDialog<void>(
+  return showAppDialog<void>(
     context: context,
     builder: (_) => _DictionaryDialog(dictionary: dictionary),
   );

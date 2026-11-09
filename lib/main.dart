@@ -20,6 +20,7 @@ import 'backup.dart';
 import 'dividers.dart';
 import 'firebase_options.dart';
 import 'format_menu.dart';
+import 'motion.dart';
 import 'skins.dart';
 import 'spell/dictionary_dialog.dart';
 import 'spell/personal_dictionary.dart';
@@ -45,6 +46,8 @@ void main() {
   WidgetsFlutterBinding.ensureInitialized();
   // оформление — до первого кадра (без мелькания чужих цветов)
   initSkin();
+  // «Уменьшить анимации»: выбор в меню или системная настройка
+  initMotion();
   // Firebase запускается уже под экраном загрузки (см. AuthGate)
   runApp(const MyApp());
 }
@@ -318,7 +321,7 @@ class _CopyUrlEntryState extends State<_CopyUrlEntry> {
                 const SizedBox(width: 8),
                 AnimatedOpacity(
                   opacity: _copied ? 1 : 0,
-                  duration: const Duration(milliseconds: 150),
+                  duration: Motion.fast,
                   child: Container(
                     padding:
                         const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
@@ -418,7 +421,8 @@ class MyApp extends StatelessWidget {
       ],
       supportedLocales: const [Locale('ru'), Locale('en')],
       theme: skinTheme(currentSkin.value),
-      home: const AuthGate(),
+      // первый экран мягко проявляется (запуск не задерживается)
+      home: const FadeScaleIn(child: AuthGate()),
     );
   }
 }
@@ -868,6 +872,35 @@ class _CalendarPageState extends State<CalendarPage>
   int _lastLen = 0;
   String? _loadedKey; // для какого дня заметка уже загружена
 
+  /// Сигнал «в редактор поставлено новое содержимое» — область заметки
+  /// мягко проявляется (только вид: загрузка и сохранение не ждут)
+  final ValueNotifier<int> _revealSignal = ValueNotifier<int>(0);
+
+  /// Выбран другой день/тема, а их текст ещё грузится — область заметки
+  /// спрятана, чтобы под новой датой не было видно старого текста
+  final ValueNotifier<bool> _noteHidden = ValueNotifier<bool>(false);
+  String? _revealedKey;
+
+  /// Сразу после выбора другого дня/темы (до загрузки)
+  void _hideNoteArea() {
+    if (_targetKey != _revealedKey) _noteHidden.value = true;
+  }
+
+  /// Новое содержимое уже в редакторе — проявить
+  void _revealIfNew(String key) {
+    if (key == _revealedKey && !_noteHidden.value) return;
+    _revealedKey = key;
+    _noteHidden.value = false;
+    _revealSignal.value++;
+  }
+
+  /// Загрузка закончилась ничем (ошибка, нет входа) — показать то, что есть
+  void _showNoteArea() {
+    if (!_noteHidden.value) return;
+    _noteHidden.value = false;
+    _revealSignal.value++;
+  }
+
   // --- работа без сети (логика — offline.dart) ---
   final ConnectionMonitor _conn = ConnectionMonitor();
   final SaveTracker _saves = SaveTracker();
@@ -976,6 +1009,8 @@ class _CalendarPageState extends State<CalendarPage>
     _saves.dispose();
     _conn.dispose();
     _unknownDay.dispose();
+    _revealSignal.dispose();
+    _noteHidden.dispose();
     _spell.dispose();
     setLeaveGuard(false);
     HardwareKeyboard.instance.removeHandler(_onGlobalKey);
@@ -1027,6 +1062,7 @@ class _CalendarPageState extends State<CalendarPage>
       tooltip: _backupBusy ? 'Идёт работа с резервной копией' : 'Меню',
       enabled: !_backupBusy, // пока идёт копия/восстановление — меню закрыто
       color: kCard,
+      popUpAnimationStyle: Motion.menu,
       icon: _backupBusy
           ? const SizedBox(
               width: 20,
@@ -1053,6 +1089,10 @@ class _CalendarPageState extends State<CalendarPage>
             break;
           case 'skin':
             _chooseSkin();
+            break;
+          case 'motion':
+            // явный выбор (важнее системной настройки); всё перерисуется
+            motion.setReduced(!motion.reduced);
             break;
           case 'logout':
             _signOut();
@@ -1093,6 +1133,13 @@ class _CalendarPageState extends State<CalendarPage>
         ),
         item('dictionary', Icons.spellcheck, 'Личный словарь'),
         item('skin', Icons.palette_outlined, 'Оформление'),
+        CheckedPopupMenuItem<String>(
+          value: 'motion',
+          height: 40,
+          checked: motion.reduced, // итог: выбор в меню или системная
+          child: Text('Уменьшить анимации',
+              style: TextStyle(color: kTextPrimary)),
+        ),
         const PopupMenuDivider(),
         PopupMenuItem<String>(
           value: 'logout',
@@ -1134,6 +1181,7 @@ class _CalendarPageState extends State<CalendarPage>
       context: context,
       position: position,
       color: kCard,
+      popUpAnimationStyle: Motion.menu,
       items: [
         for (final s in kSkins)
           PopupMenuItem<AppSkin>(
@@ -1185,7 +1233,7 @@ class _CalendarPageState extends State<CalendarPage>
   Future<void> _showMessage(String title, String body,
       {bool error = false}) async {
     if (!mounted) return;
-    await showDialog<void>(
+    await showAppDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kSurface,
@@ -1330,7 +1378,7 @@ class _CalendarPageState extends State<CalendarPage>
     final created = data.createdAt.toLocal();
     final time =
         '${created.hour.toString().padLeft(2, '0')}:${created.minute.toString().padLeft(2, '0')}';
-    final ok = await showDialog<bool>(
+    final ok = await showAppDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kSurface,
@@ -1482,7 +1530,7 @@ class _CalendarPageState extends State<CalendarPage>
       final progress = ValueNotifier<(int, int)>(
           (0, data.notes.length + data.topics.length));
       BuildContext? dialogCtx;
-      showDialog<void>(
+      showAppDialog<void>(
         context: context,
         barrierDismissible: false,
         builder: (ctx) {
@@ -1591,7 +1639,7 @@ class _CalendarPageState extends State<CalendarPage>
     if (!mounted) return;
     var confirmed = false;
     if (_loadedKey == _targetKey && _isDirty) {
-      final leave = await showDialog<bool>(
+      final leave = await showAppDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: kSurface,
@@ -1619,7 +1667,7 @@ class _CalendarPageState extends State<CalendarPage>
             waitForPendingWrites: _db.waitForPendingWrites,
             hasRejected: () => _saves.hasRejected)) {
       if (!mounted) return;
-      final leave = await showDialog<bool>(
+      final leave = await showAppDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: kSurface,
@@ -1662,6 +1710,7 @@ class _CalendarPageState extends State<CalendarPage>
       _loadTarget();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Не удалось выйти. Попробуйте ещё раз')),
+        snackBarAnimationStyle: Motion.snackBar
       );
     }
   }
@@ -1759,10 +1808,14 @@ class _CalendarPageState extends State<CalendarPage>
 
   Future<void> _loadNote(DateTime day) async {
     _loadingNow = true;
+    final loading = _loadNoteInner(day);
+    final seq = _loadSeq; // номер этой загрузки (присвоен синхронно)
     try {
-      await _loadNoteInner(day);
+      await loading;
     } finally {
       _loadingNow = false;
+      // последняя загрузка закончилась — область заметки не остаётся пустой
+      if (mounted && seq == _loadSeq) _showNoteArea();
     }
   }
 
@@ -1838,6 +1891,7 @@ class _CalendarPageState extends State<CalendarPage>
     _docIsDay = true;
     _setEditorDocument(document);
     _loadedKey = key;
+    _revealIfNew(key);
     _setStatus('');
     _watchNote(key);
     if (rejected != null) {
@@ -1884,10 +1938,13 @@ class _CalendarPageState extends State<CalendarPage>
 
   Future<void> _loadTopic(String id) async {
     _loadingNow = true;
+    final loading = _loadTopicInner(id);
+    final seq = _loadSeq;
     try {
-      await _loadTopicInner(id);
+      await loading;
     } finally {
       _loadingNow = false;
+      if (mounted && seq == _loadSeq) _showNoteArea();
     }
   }
 
@@ -1916,6 +1973,7 @@ class _CalendarPageState extends State<CalendarPage>
     if (content == null) {
       // темы больше нет (удалена на другом устройстве) — вернуться к дню
       setState(() => _openTopicId = null);
+      _hideNoteArea();
       _topics.load();
       _loadNote(_selectedDay);
       return;
@@ -1947,6 +2005,7 @@ class _CalendarPageState extends State<CalendarPage>
     _docIsDay = false;
     _setEditorDocument(document);
     _loadedKey = key;
+    _revealIfNew(key);
     _setStatus('');
     if (rejected != null) {
       _lastSavedJson = _rejectedMark; // автосохранение повторит запись
@@ -2041,6 +2100,7 @@ class _CalendarPageState extends State<CalendarPage>
       _focusedDay = focusedDay;
       _openTopicId = null; // клик по дню возвращает заметку дня
     });
+    _hideNoteArea();
     _status.value = '';
     _loadNote(selectedDay);
   }
@@ -2100,7 +2160,8 @@ class _CalendarPageState extends State<CalendarPage>
     if (!mounted || _spellFailedShown) return;
     _spellFailedShown = true;
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Проверка правописания сейчас недоступна')));
+        content: Text('Проверка правописания сейчас недоступна')),
+        snackBarAnimationStyle: Motion.snackBar);
   }
 
   /// users/{uid} вошедшего пользователя (null — нет входа)
@@ -2173,7 +2234,8 @@ class _CalendarPageState extends State<CalendarPage>
       duration: const Duration(seconds: 8),
       content: Text('$msg: $where. Текст не потерян — откройте '
           '${topicId != null ? 'тему' : 'этот день'}, и он сохранится снова.'),
-    ));
+    ),
+        snackBarAnimationStyle: Motion.snackBar);
   }
 
   void _onTopicLateError(String what, Object e) {
@@ -2185,7 +2247,8 @@ class _CalendarPageState extends State<CalendarPage>
   void _onTemplatesLateError(Object e) {
     if (!mounted || _signingOut) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Шаблоны не сохранены на сервере: ${describeError(e)}')));
+        content: Text('Шаблоны не сохранены на сервере: ${describeError(e)}')),
+        snackBarAnimationStyle: Motion.snackBar);
     _templatesLoaded = false;
     _templatesLoading = _loadTemplateSettings();
   }
@@ -2212,10 +2275,17 @@ class _CalendarPageState extends State<CalendarPage>
                 ),
                 const SizedBox(width: 10),
               ],
-              if (_conn.offline) ...[
-                const _OfflineChip(),
-                const SizedBox(width: 8),
-              ],
+              FadeSwitcher(
+                alignment: Alignment.centerRight,
+                dy: 0,
+                child: _conn.offline
+                    ? const Padding(
+                        key: ValueKey('offline'),
+                        padding: EdgeInsets.only(right: 8),
+                        child: _OfflineChip(),
+                      )
+                    : const SizedBox.shrink(key: ValueKey('online')),
+              ),
               Flexible(
                 child: ValueListenableBuilder<String>(
                   valueListenable: _status,
@@ -2226,9 +2296,14 @@ class _CalendarPageState extends State<CalendarPage>
                         status.startsWith('Не удалось')) {
                       color = const Color(0xFFFF5C5C);
                     }
-                    return Text(status,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(color: color, fontSize: 13));
+                    return FadeSwitcher(
+                      alignment: Alignment.centerRight,
+                      dy: 0,
+                      child: Text(status,
+                          key: ValueKey(status),
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: color, fontSize: 13)),
+                    );
                   },
                 ),
               ),
@@ -2485,6 +2560,7 @@ class _CalendarPageState extends State<CalendarPage>
     if (!mounted || message.isEmpty) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), duration: const Duration(seconds: 3)),
+        snackBarAnimationStyle: Motion.snackBar
     );
   }
 
@@ -2512,7 +2588,7 @@ class _CalendarPageState extends State<CalendarPage>
         child: IgnorePointer(
           child: TweenAnimationBuilder<double>(
             tween: Tween(begin: 0, end: 1),
-            duration: const Duration(milliseconds: 150),
+            duration: Motion.fast,
             builder: (_, v, child) => Opacity(opacity: v, child: child),
             child: Material(
               color: Colors.transparent,
@@ -2627,7 +2703,7 @@ class _CalendarPageState extends State<CalendarPage>
       }
     }
     if (!mounted) return;
-    await showDialog<void>(
+    await showAppDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (_) => _TemplatesDialog(
@@ -2659,6 +2735,7 @@ class _CalendarPageState extends State<CalendarPage>
     if (_loadedKey == _targetKey && _isDirty) unawaited(_saveNote());
     if (!mounted) return;
     setState(() => _openTopicId = id);
+    _hideNoteArea();
     _status.value = '';
     _loadTopic(id);
   }
@@ -2698,6 +2775,7 @@ class _CalendarPageState extends State<CalendarPage>
       // несохранённые правки удаляемой темы не нужны: сразу возвращаемся
       // к дню (с этого момента тема не сохраняется — ключ цели другой)
       setState(() => _openTopicId = null);
+      _hideNoteArea();
       _status.value = '';
       _loadNote(_selectedDay);
     }
@@ -2717,6 +2795,7 @@ class _CalendarPageState extends State<CalendarPage>
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('$what: ${describeError(e)}')),
+        snackBarAnimationStyle: Motion.snackBar
     );
   }
 
@@ -2743,13 +2822,17 @@ class _CalendarPageState extends State<CalendarPage>
                 Icon(Icons.topic_outlined, size: 18, color: kAccent),
                 const SizedBox(width: 8),
                 Flexible(
-                  child: Text(
-                    title,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: kAccentLight,
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600,
+                  child: FadeSwitcher(
+                    dy: 0,
+                    child: Text(
+                      title,
+                      key: ValueKey(title),
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: kAccentLight,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
                 ),
@@ -2885,14 +2968,20 @@ class _CalendarPageState extends State<CalendarPage>
           day),
       onDaySelected: _onDaySelected,
       onPageChanged: (d) => setState(() => _focusedDay = d),
+      // листание месяца — длительность и кривая из модуля анимаций
+      pageAnimationDuration: Motion.calendarPage,
+      pageAnimationCurve: Motion.move,
+      formatAnimationDuration: Motion.calendarPage,
+      formatAnimationCurve: Motion.move,
       // клик по названию месяца — показать все месяцы года
       onHeaderTapped: (_) => setState(() {
         _pickerYear = _focusedDay.year;
         _showMonths = true;
       }),
-      calendarBuilders: CalendarBuilders(
-        // открыта тема — день, к которому вернёмся, виден приглушённо
-        selectedBuilder: selectedDayBuilder(topicOpen: _openTopicId != null),
+      // все ячейки дней — одна и та же DayCell: выделение плавно
+      // появляется/гаснет, при наведении — лёгкая подсветка
+      calendarBuilders: dayCellBuilders(
+        topicOpen: _openTopicId != null,
         dowBuilder: (context, day) => Center(
           child: Text(
             kWeekdaysShort[day.weekday - 1],
@@ -3020,44 +3109,57 @@ class _CalendarPageState extends State<CalendarPage>
           Row(
             children: [
               // кнопка сворачивания календаря — рядом с датой
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                icon: Icon(
-                  _calendarVisible
-                      ? Icons.calendar_month
-                      : Icons.calendar_today,
-                  color: kAccent,
+              PressScale(
+                child: IconButton(
+                  visualDensity: VisualDensity.compact,
+                  icon: Icon(
+                    _calendarVisible
+                        ? Icons.calendar_month
+                        : Icons.calendar_today,
+                    color: kAccent,
+                  ),
+                  tooltip: _calendarVisible
+                      ? 'Скрыть календарь'
+                      : 'Показать календарь',
+                  onPressed: () =>
+                      setState(() => _calendarVisible = !_calendarVisible),
                 ),
-                tooltip:
-                    _calendarVisible ? 'Скрыть календарь' : 'Показать календарь',
-                onPressed: () =>
-                    setState(() => _calendarVisible = !_calendarVisible),
               ),
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                icon: Icon(Icons.search, color: kAccent),
-                tooltip: 'Поиск по заметкам',
-                onPressed: _openSearch,
+              PressScale(
+                child: IconButton(
+                  visualDensity: VisualDensity.compact,
+                  icon: Icon(Icons.search, color: kAccent),
+                  tooltip: 'Поиск по заметкам',
+                  onPressed: _openSearch,
+                ),
               ),
-              ToolbarToggleButton(
-                visible: _toolbarVisible,
-                onPressed: _toggleToolbar,
+              PressScale(
+                child: ToolbarToggleButton(
+                  visible: _toolbarVisible,
+                  onPressed: _toggleToolbar,
+                ),
               ),
               const SizedBox(width: 6),
               Expanded(
-                child: _openTopicId != null
-                    ? _topicHeader(_openTopicId!)
-                    : Text(
-                  _formatDate(_selectedDay),
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: kAccentLight,
-                    fontSize: 17,
-                    fontWeight: FontWeight.w600,
-                  ),
+                // смена даты/темы — быстрое перетекание (только заголовок)
+                child: FadeSwitcher(
+                  child: _openTopicId != null
+                      ? KeyedSubtree(
+                          key: ValueKey('t:$_openTopicId'),
+                          child: _topicHeader(_openTopicId!))
+                      : Text(
+                          _formatDate(_selectedDay),
+                          key: ValueKey(_dayKey(_selectedDay)),
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: kAccentLight,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
                 ),
               ),
-              _appMenu(),
+              PressScale(child: _appMenu()),
             ],
           ),
           const SizedBox(height: 14),
@@ -3088,7 +3190,13 @@ class _CalendarPageState extends State<CalendarPage>
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(color: kDivider),
               ),
-              child: Stack(
+              // новое содержимое мягко проявляется; редактор тот же
+              // (ни второго экземпляра, ни пересоздания), ввод не блокируется
+              child: RepaintBoundary(
+                child: RevealOnSignal(
+                  signal: _revealSignal,
+                  hidden: _noteHidden,
+                  child: Stack(
                 children: [
                   // заставка видна, пока в заметке ничего нет (например, выходной)
                   Positioned.fill(
@@ -3098,7 +3206,7 @@ class _CalendarPageState extends State<CalendarPage>
                         builder: (context, _) {
                           final empty = _controller.document.isEmpty();
                           return AnimatedOpacity(
-                            duration: const Duration(milliseconds: 250),
+                            duration: Motion.slow,
                             opacity: empty ? 1 : 0,
                             child: Center(
                               child: Image.asset(
@@ -3131,6 +3239,8 @@ class _CalendarPageState extends State<CalendarPage>
                         _editorScroll),
                   ),
                 ],
+                  ),
+                ),
               ),
             ),
           ),
@@ -3164,18 +3274,16 @@ class _CalendarPageState extends State<CalendarPage>
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        // Календарь слева
-                        AnimatedSize(
-                          duration: const Duration(milliseconds: 250),
-                          curve: Curves.easeInOut,
+                        // Календарь слева: плавно меняется ширина, содержимое
+                        // своей ширины обрезается и тает (без переполнения)
+                        CollapseReveal(
+                          open: _calendarVisible,
                           child: SizedBox(
-                            width: _calendarVisible ? 320 : 0,
-                            child: _calendarVisible
-                                ? Padding(
-                                    padding: const EdgeInsets.only(right: 20),
-                                    child: _leftColumn(),
-                                  )
-                                : null,
+                            width: 320,
+                            child: Padding(
+                              padding: const EdgeInsets.only(right: 20),
+                              child: _leftColumn(),
+                            ),
                           ),
                         ),
                         // Заметка посередине
@@ -3191,12 +3299,20 @@ class _CalendarPageState extends State<CalendarPage>
             return ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                if (_calendarVisible) ...[
-                  _calendarPanel(),
-                  const SizedBox(height: 16),
-                  SizedBox(height: 300, child: _topicsPanel()),
-                  const SizedBox(height: 16),
-                ],
+                CollapseReveal(
+                  open: _calendarVisible,
+                  axis: Axis.vertical,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _calendarPanel(),
+                      const SizedBox(height: 16),
+                      SizedBox(height: 300, child: _topicsPanel()),
+                      const SizedBox(height: 16),
+                    ],
+                  ),
+                ),
                 SizedBox(height: 560, child: _notePanel()),
               ],
             );
@@ -3234,39 +3350,149 @@ DateTime calendarHighlightDay({
 }) =>
     topicOpen ? now : selected;
 
-/// Ячейка отмеченного дня: открыта тема — приглушённая заливка (свой
-/// виджет, без анимации — без кадра яркого круга); открыт день — null,
-/// обычное яркое выделение календаря
-FocusedDayBuilder? selectedDayBuilder({
-  required bool topicOpen,
-  DateTime Function() now = DateTime.now,
-}) {
-  if (!topicOpen) return null;
-  return (context, day, focusedDay) =>
-      MutedSelectedDay(day: day, isToday: isSameDay(day, now()));
+/// Как отмечен день в календаре
+enum DayMark {
+  /// не отмечен
+  none,
+
+  /// открыт этот день — яркий круг
+  bright,
+
+  /// открыта тема — сегодняшний день приглушённо
+  muted,
 }
 
-/// Отмеченный день, пока открыта тема (сегодняшний): приглушённая заливка,
-/// поверх — отметка сегодняшнего дня (сиреневый жирный номер).
-class MutedSelectedDay extends StatelessWidget {
-  const MutedSelectedDay({super.key, required this.day, required this.isToday});
+/// Ячейки дней календаря. Выбранный, сегодняшний, соседнего месяца и
+/// обычные дни — один и тот же виджет DayCell, поэтому при смене выбора
+/// ячейка не пересоздаётся и круг плавно появляется/гаснет. Какая ячейка
+/// какая — решает сам table_calendar (выходит на нужный builder).
+CalendarBuilders dayCellBuilders({
+  required bool topicOpen,
+  DateTime Function() now = DateTime.now,
+  DayBuilder? dowBuilder,
+}) {
+  return CalendarBuilders(
+    dowBuilder: dowBuilder,
+    selectedBuilder: (context, day, focused) => DayCell(
+      day: day,
+      mark: topicOpen ? DayMark.muted : DayMark.bright,
+      isToday: isSameDay(day, now()),
+    ),
+    todayBuilder: (context, day, focused) =>
+        DayCell(day: day, isToday: true),
+    outsideBuilder: (context, day, focused) =>
+        DayCell(day: day, outside: true),
+    defaultBuilder: (context, day, focused) => DayCell(
+      day: day,
+      weekend: day.weekday == DateTime.saturday ||
+          day.weekday == DateTime.sunday,
+    ),
+  );
+}
+
+/// Ячейка дня: круг выделения (яркий или приглушённый) появляется и гаснет
+/// с лёгким масштабом, цвет номера перетекает; при наведении — едва
+/// заметная подсветка. Нажатия обрабатывает table_calendar.
+class DayCell extends StatefulWidget {
+  const DayCell({
+    super.key,
+    required this.day,
+    this.mark = DayMark.none,
+    this.isToday = false,
+    this.outside = false,
+    this.weekend = false,
+  });
 
   final DateTime day;
+  final DayMark mark;
   final bool isToday;
+  final bool outside;
+  final bool weekend;
+
+  /// Цвет номера
+  TextStyle get textStyle {
+    final s = kCalendarStyle;
+    switch (mark) {
+      case DayMark.bright:
+        return s.selectedTextStyle;
+      case DayMark.muted:
+        return isToday
+            ? s.todayTextStyle
+            : TextStyle(color: kTextPrimary, fontWeight: FontWeight.w600);
+      case DayMark.none:
+        if (isToday) return s.todayTextStyle;
+        if (outside) return s.outsideTextStyle;
+        if (weekend) return s.weekendTextStyle;
+        return s.defaultTextStyle;
+    }
+  }
+
+  /// Заливка круга (прозрачная — того же оттенка, чтобы перетекание было
+  /// чистым, без серого)
+  Color circleColor({required bool hovered}) {
+    switch (mark) {
+      case DayMark.bright:
+        return kAccent;
+      case DayMark.muted:
+        return kMutedSelection;
+      case DayMark.none:
+        return hovered ? kAccent.withAlpha(0x1F) : kAccent.withAlpha(0);
+    }
+  }
+
+  @override
+  State<DayCell> createState() => _DayCellState();
+}
+
+class _DayCellState extends State<DayCell> {
+  bool _hover = false;
+
+  void _setHover(bool v) {
+    if (_hover != v) setState(() => _hover = v);
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: kCalendarStyle.cellMargin,
-      padding: kCalendarStyle.cellPadding,
-      alignment: kCalendarStyle.cellAlignment,
-      decoration: BoxDecoration(
-          color: kMutedSelection, shape: BoxShape.circle),
-      child: Text(
-        '${day.day}',
-        style: isToday
-            ? kCalendarStyle.todayTextStyle
-            : TextStyle(color: kTextPrimary, fontWeight: FontWeight.w600),
+    final style = kCalendarStyle;
+    final shown = widget.mark != DayMark.none || _hover;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => _setHover(true),
+      onExit: (_) => _setHover(false),
+      child: Padding(
+        padding: style.cellMargin,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            AnimatedScale(
+              scale: shown ? 1 : 0.8,
+              duration: Motion.fast,
+              curve: Motion.enter,
+              child: AnimatedContainer(
+                duration: Motion.fast,
+                curve: Motion.enter,
+                decoration: BoxDecoration(
+                  color: widget.circleColor(hovered: _hover),
+                  shape: BoxShape.circle,
+                ),
+              ),
+            ),
+            Padding(
+              padding: style.cellPadding,
+              child: Align(
+                alignment: style.cellAlignment,
+                child: AnimatedDefaultTextStyle(
+                  duration: Motion.fast,
+                  curve: Motion.enter,
+                  style: DefaultTextStyle.of(context)
+                      .style
+                      .merge(widget.textStyle),
+                  child: Text('${widget.day.day}'),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -3282,36 +3508,48 @@ class TodayButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = subdued ? kTextSecondary : kAccentLight;
     return Tooltip(
       message: 'Перейти на сегодня',
       child: Semantics(
         button: true,
         label: 'Перейти на сегодня',
         excludeSemantics: true,
-        child: SizedBox(
-          width: double.infinity,
-          height: 36,
-          child: TextButton.icon(
-            onPressed: onPressed,
-            icon: Icon(Icons.today_outlined, size: 18, color: color),
-            label: Text(
-              'Сегодня',
-              style: TextStyle(
-                color: color,
-                fontSize: 14,
-                fontWeight: subdued ? FontWeight.w500 : FontWeight.w600,
-              ),
-            ),
-            style: TextButton.styleFrom(
-              backgroundColor: subdued ? Colors.transparent : kCard,
-              foregroundColor: color,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-                side: BorderSide(color: kDivider),
-              ),
-            ),
+        child: PressScale(
+          scale: 0.98,
+          // приглушённая ↔ обычная — цвета плавно перетекают
+          child: TweenAnimationBuilder<double>(
+            tween: Tween(end: subdued ? 0 : 1),
+            duration: Motion.fast,
+            curve: Motion.enter,
+            builder: (context, t, _) {
+              final color = Color.lerp(kTextSecondary, kAccentLight, t)!;
+              return SizedBox(
+                width: double.infinity,
+                height: 36,
+                child: TextButton.icon(
+                  onPressed: onPressed,
+                  icon: Icon(Icons.today_outlined, size: 18, color: color),
+                  label: Text(
+                    'Сегодня',
+                    style: TextStyle(
+                      color: color,
+                      fontSize: 14,
+                      fontWeight: subdued ? FontWeight.w500 : FontWeight.w600,
+                    ),
+                  ),
+                  style: TextButton.styleFrom(
+                    backgroundColor: Color.lerp(kCard.withAlpha(0), kCard, t),
+                    foregroundColor: color,
+                    animationDuration: Motion.fast,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: BorderSide(color: kDivider),
+                    ),
+                  ),
+                ),
+              );
+            },
           ),
         ),
       ),

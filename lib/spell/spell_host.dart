@@ -11,6 +11,7 @@ import 'package:flutter_quill/flutter_quill.dart';
 
 import '../main.dart' show kAccent, kDivider, kSurface, kTextPrimary,
     kTextSecondary;
+import '../motion.dart' show FadeScaleIn, Motion;
 import 'spell_edit.dart';
 import 'spell_engine.dart';
 import 'tokenizer.dart';
@@ -479,7 +480,8 @@ class SpellCheckHostState extends State<SpellCheckHost> {
         textColor: kAccent,
         onPressed: () => engine.dictionary.remove(word),
       ),
-    ));
+    ),
+        snackBarAnimationStyle: Motion.snackBar);
   }
 
   // ---------- вид ----------
@@ -551,7 +553,12 @@ class SpellCheckHostState extends State<SpellCheckHost> {
         Positioned(
           left: p.dx,
           top: p.dy,
-          child: Listener(
+          // меню вариантов мягко появляется
+          child: FadeScaleIn(
+            duration: Motion.fast,
+            scaleFrom: 0.97,
+            alignment: Alignment.topLeft,
+            child: Listener(
             onPointerDown: (e) => _menuPointer = e.pointer,
             child: TextFieldTapRegion(
               child: Material(
@@ -578,6 +585,7 @@ class SpellCheckHostState extends State<SpellCheckHost> {
                 ),
               ),
             ),
+          ),
           ),
         ),
       ],
@@ -633,8 +641,11 @@ class _MenuRowState extends State<_MenuRow> {
             widget.onTap();
           }
         },
-        child: ColoredBox(
-          color: _hover ? kAccent.withValues(alpha: 0.18) : Colors.transparent,
+        child: AnimatedContainer(
+          duration: Motion.fast, // подсветка при наведении перетекает
+          color: _hover
+              ? kAccent.withValues(alpha: 0.18)
+              : kAccent.withValues(alpha: 0),
           child: widget.child,
         ),
       ),

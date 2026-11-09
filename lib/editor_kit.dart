@@ -730,6 +730,7 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
     final choice = await showMenu<String>(
       context: context,
       color: kCard,
+      popUpAnimationStyle: Motion.menu,
       position: RelativeRect.fromLTRB(
         p.dx,
         p.dy + 8,
@@ -843,7 +844,7 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
     final urlCtrl = TextEditingController(text: oldUrl ?? '');
     final textCtrl = TextEditingController(text: selectedText);
 
-    final ok = await showDialog<bool>(
+    final ok = await showAppDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kSurface,
@@ -930,13 +931,18 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
       child: InkWell(
         borderRadius: BorderRadius.circular(8),
         onTap: onPressed,
-        child: Container(
+        child: AnimatedContainer(
+          duration: Motion.fast, // включение/выключение — плавно
+          curve: Motion.enter,
           width: 36,
           height: 36,
           decoration: BoxDecoration(
-            color: active ? kAccent.withValues(alpha: 0.2) : Colors.transparent,
+            color: active
+                ? kAccent.withValues(alpha: 0.2)
+                : kAccent.withValues(alpha: 0),
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: active ? kAccent : Colors.transparent),
+            border: Border.all(
+                color: active ? kAccent : kAccent.withValues(alpha: 0)),
           ),
           child: Icon(icon,
               size: 19, color: active ? kAccentLight : kTextSecondary),

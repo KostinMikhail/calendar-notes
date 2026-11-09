@@ -195,7 +195,7 @@ class _TemplatesDialogState extends State<_TemplatesDialog>
   }
 
   Future<bool> _confirm(String title, String body, String ok) async {
-    final res = await showDialog<bool>(
+    final res = await showAppDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kSurface,
