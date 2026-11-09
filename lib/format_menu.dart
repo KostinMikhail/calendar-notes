@@ -357,6 +357,7 @@ class _FormatMenuHostState extends State<FormatMenuHost>
     final routeOk = ModalRoute.of(context)?.isCurrent ?? true;
     if (!sel.isValid ||
         sel.isCollapsed ||
+        _c.readOnly || // ввод закрыт — форматировать нельзя
         !widget.focusNode.hasFocus ||
         _outside.isNotEmpty ||
         (widget.suppressed?.value ?? false) ||

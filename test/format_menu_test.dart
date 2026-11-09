@@ -380,6 +380,19 @@ void main() {
       expect(find.byTooltip('Жирный'), findsNothing);
     });
 
+    testWidgets('ввод закрыт (заметка не загружена) — меню нет, открыли — '
+        'есть', (tester) async {
+      await pumpEditor(tester);
+      c.readOnly = true;
+      select(c, 7, 12);
+      await settle(tester);
+      expect(find.byTooltip('Жирный'), findsNothing);
+      c.readOnly = false;
+      select(c, 7, 11);
+      await settle(tester);
+      expect(find.byTooltip('Жирный'), findsOneWidget);
+    });
+
     testWidgets('без фокуса меню нет', (tester) async {
       await pumpEditor(tester);
       select(c, 7, 12);

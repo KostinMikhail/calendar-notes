@@ -454,6 +454,16 @@ bool shouldSaveDay({
 }) =>
     loadedKey != null && loadedKey == targetKey && currentJson != savedJson;
 
+/// Можно ли вводить текст в редактор: в нём та заметка, которая выбрана, и
+/// она загружена. Иначе ввод попал бы в чужой (старый) документ, сохранить
+/// его нельзя (см. [shouldSaveDay]) и он пропал бы при подмене документа.
+bool noteEditable({
+  required String? loadedKey,
+  required String targetKey,
+  bool signingOut = false,
+}) =>
+    !signingOut && loadedKey != null && loadedKey == targetKey;
+
 // ============================================================
 //  Фоновая загрузка всех заметок в локальную копию
 // ============================================================

@@ -872,6 +872,39 @@ class _CalendarPageState extends State<CalendarPage>
   int _lastLen = 0;
   String? _loadedKey; // для какого дня заметка уже загружена
 
+  /// Меняет [_loadedKey] и сразу открывает/закрывает ввод в редактор:
+  /// пока выбранная заметка не загружена, ввод закрыт (иначе он ушёл бы в
+  /// старый документ и пропал)
+  void _setLoadedKey(String? key) {
+    _loadedKey = key;
+    _syncEditorLock();
+  }
+
+  void _syncEditorLock() {
+    final lock = !noteEditable(
+        loadedKey: _loadedKey, targetKey: _targetKey, signingOut: _signingOut);
+    if (_controller.readOnly == lock) return;
+    _controller.readOnly = lock;
+    // QuillEditor читает readOnly при сборке
+    if (mounted) setState(() {});
+  }
+
+  /// Заметку загрузить не удалось — текст ошибки на месте заметки (старый
+  /// документ не показываем: под новой датой он выглядел бы как её текст)
+  final ValueNotifier<String?> _loadError = ValueNotifier<String?>(null);
+
+  void _failLoad(String message) {
+    _noteHidden.value = true;
+    _loadError.value = message;
+  }
+
+  /// «Повторить» на плашке ошибки (автосохранение и так повторяет каждые 5 с)
+  void _retryLoad() {
+    if (_loadingNow) return;
+    _loadError.value = null;
+    _loadTarget();
+  }
+
   /// Сигнал «в редактор поставлено новое содержимое» — область заметки
   /// мягко проявляется (только вид: загрузка и сохранение не ждут)
   final ValueNotifier<int> _revealSignal = ValueNotifier<int>(0);
@@ -883,11 +916,15 @@ class _CalendarPageState extends State<CalendarPage>
 
   /// Сразу после выбора другого дня/темы (до загрузки)
   void _hideNoteArea() {
+    // ошибка относилась к прошлой заметке; область остаётся спрятанной,
+    // пока не загрузится новая (или не придёт её собственная ошибка)
+    _loadError.value = null;
     if (_targetKey != _revealedKey) _noteHidden.value = true;
   }
 
   /// Новое содержимое уже в редакторе — проявить
   void _revealIfNew(String key) {
+    _loadError.value = null;
     if (key == _revealedKey && !_noteHidden.value) return;
     _revealedKey = key;
     _noteHidden.value = false;
@@ -896,7 +933,8 @@ class _CalendarPageState extends State<CalendarPage>
 
   /// Загрузка закончилась ничем (ошибка, нет входа) — показать то, что есть
   void _showNoteArea() {
-    if (!_noteHidden.value) return;
+    // ошибка загрузки — вместо старого текста плашка с «Повторить»
+    if (!_noteHidden.value || _loadError.value != null) return;
     _noteHidden.value = false;
     _revealSignal.value++;
   }
@@ -974,6 +1012,7 @@ class _CalendarPageState extends State<CalendarPage>
   void initState() {
     super.initState();
     _controller = QuillController.basic(config: kEditorControllerConfig);
+    _controller.readOnly = true; // до загрузки первой заметки ввод закрыт
     _editorFocus = FocusNode();
     _editorFocus.addListener(_onEditorFocusChanged);
     HardwareKeyboard.instance.addHandler(_onGlobalKey);
@@ -1011,6 +1050,7 @@ class _CalendarPageState extends State<CalendarPage>
     _unknownDay.dispose();
     _revealSignal.dispose();
     _noteHidden.dispose();
+    _loadError.dispose();
     _spell.dispose();
     setLeaveGuard(false);
     HardwareKeyboard.instance.removeHandler(_onGlobalKey);
@@ -1524,7 +1564,7 @@ class _CalendarPageState extends State<CalendarPage>
       final notes = _notes;
       if (notes == null || !mounted) return;
       touched = true;
-      _loadedKey = null; // старое содержимое редактора больше не сохранится
+      _setLoadedKey(null); // старое содержимое редактора больше не сохранится
 
       // 5. запись с прогрессом
       final progress = ValueNotifier<(int, int)>(
@@ -1690,7 +1730,7 @@ class _CalendarPageState extends State<CalendarPage>
     _signingOut = true;
     _autoTimer?.cancel();
     _unwatchNote();
-    _loadedKey = null;
+    _setLoadedKey(null);
     _lastSavedJson = '';
     _lastSeenJson = '';
     _lastLen = 0;
@@ -1821,7 +1861,7 @@ class _CalendarPageState extends State<CalendarPage>
 
   Future<void> _loadNoteInner(DateTime day) async {
     final key = _dayKey(day);
-    _loadedKey = null; // пока не загрузили — сохранять нельзя (чтобы не затереть заметку)
+    _setLoadedKey(null); // пока не загрузили — ни сохранять, ни вводить
     _unknownDay.value = false;
     final seq = ++_loadSeq;
 
@@ -1836,10 +1876,16 @@ class _CalendarPageState extends State<CalendarPage>
       doc = r.value;
       fromCache = r.fromCache;
     } on FirebaseException catch (e) {
-      if (seq == _loadSeq) _setStatus('Не удалось загрузить (${e.code})');
+      if (seq == _loadSeq) {
+        _setStatus('Не удалось загрузить (${e.code})');
+        _failLoad(loadErrorText(e.code));
+      }
       return;
     } catch (_) {
-      if (seq == _loadSeq) _setStatus('Не удалось загрузить');
+      if (seq == _loadSeq) {
+        _setStatus('Не удалось загрузить');
+        _failLoad(loadErrorText(null));
+      }
       return;
     }
     // пока грузилось, мог быть выбран другой день или тема
@@ -1890,7 +1936,7 @@ class _CalendarPageState extends State<CalendarPage>
 
     _docIsDay = true;
     _setEditorDocument(document);
-    _loadedKey = key;
+    _setLoadedKey(key);
     _revealIfNew(key);
     _setStatus('');
     _watchNote(key);
@@ -1953,7 +1999,7 @@ class _CalendarPageState extends State<CalendarPage>
     final key = topicKey(id);
     _unwatchNote();
     _unknownDay.value = false;
-    _loadedKey = null; // пока не загрузили — сохранять нельзя
+    _setLoadedKey(null); // пока не загрузили — ни сохранять, ни вводить
     final seq = ++_loadSeq;
     if (_notes == null) return;
 
@@ -1961,10 +2007,16 @@ class _CalendarPageState extends State<CalendarPage>
     try {
       content = await _topics.store.load(id);
     } on FirebaseException catch (e) {
-      if (seq == _loadSeq) _setStatus('Не удалось загрузить (${e.code})');
+      if (seq == _loadSeq) {
+        _setStatus('Не удалось загрузить (${e.code})');
+        _failLoad(loadErrorText(e.code));
+      }
       return;
     } catch (_) {
-      if (seq == _loadSeq) _setStatus('Не удалось загрузить');
+      if (seq == _loadSeq) {
+        _setStatus('Не удалось загрузить');
+        _failLoad(loadErrorText(null));
+      }
       return;
     }
     // пока грузилось, могли открыть другую тему или день
@@ -2004,7 +2056,7 @@ class _CalendarPageState extends State<CalendarPage>
 
     _docIsDay = false;
     _setEditorDocument(document);
-    _loadedKey = key;
+    _setLoadedKey(key);
     _revealIfNew(key);
     _setStatus('');
     if (rejected != null) {
@@ -3190,9 +3242,15 @@ class _CalendarPageState extends State<CalendarPage>
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(color: kDivider),
               ),
+              child: Stack(
+                children: [
               // новое содержимое мягко проявляется; редактор тот же
-              // (ни второго экземпляра, ни пересоздания), ввод не блокируется
-              child: RepaintBoundary(
+              // (ни второго экземпляра, ни пересоздания). Пока выбранная
+              // заметка не загружена — щелчки по (спрятанному) старому
+              // документу не принимаются, ввод закрыт (readOnly)
+              IgnorePointer(
+                ignoring: _controller.readOnly,
+                child: RepaintBoundary(
                 child: RevealOnSignal(
                   signal: _revealSignal,
                   hidden: _noteHidden,
@@ -3241,6 +3299,19 @@ class _CalendarPageState extends State<CalendarPage>
                 ],
                   ),
                 ),
+              ),
+              ),
+                  // загрузка не удалась — вместо старого текста плашка
+                  Positioned.fill(
+                    child: ValueListenableBuilder<String?>(
+                      valueListenable: _loadError,
+                      builder: (context, error, _) => error == null
+                          ? const SizedBox.shrink()
+                          : NoteLoadError(
+                              message: error, onRetry: _retryLoad),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -3580,6 +3651,67 @@ class _OfflineChip extends StatelessWidget {
             SizedBox(width: 5),
             Text(kOfflineChip,
                 style: TextStyle(color: kAccentLight, fontSize: 12)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Текст плашки «не удалось загрузить» по коду ошибки Firestore
+String loadErrorText(String? code) {
+  switch (code) {
+    case 'permission-denied':
+      return 'Нет доступа к этой заметке. Попробуйте выйти и войти снова.';
+    case 'unavailable':
+    case 'deadline-exceeded':
+      return 'Нет связи с сервером, а на устройстве этой заметки нет.';
+    default:
+      return code == null
+          ? 'Не удалось загрузить заметку.'
+          : 'Не удалось загрузить заметку ($code).';
+  }
+}
+
+/// Плашка на месте заметки, которую не удалось загрузить. Старый текст не
+/// показывается; повтор — кнопкой или сам (автосохранение каждые 5 с).
+class NoteLoadError extends StatelessWidget {
+  const NoteLoadError(
+      {super.key, required this.message, required this.onRetry});
+
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    // мало места (узкий экран) — прокручивается, без переполнения
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.cloud_off_outlined, size: 28, color: kTextSecondary),
+            const SizedBox(height: 10),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: kTextPrimary, fontSize: 14),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Пробуем снова автоматически.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: kTextSecondary, fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            PressScale(
+              child: TextButton.icon(
+                onPressed: onRetry,
+                icon: Icon(Icons.refresh, size: 18, color: kAccent),
+                label: Text('Повторить', style: TextStyle(color: kAccent)),
+              ),
+            ),
           ],
         ),
       ),

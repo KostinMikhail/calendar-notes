@@ -26,7 +26,8 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
   /// Глобальный перехват: срабатывает раньше, чем сам редактор,
   /// но только пока курсор стоит в поле заметки.
   bool _onGlobalKey(KeyEvent event) {
-    if (!_ef.hasFocus) return false;
+    // ввод закрыт (заметка ещё не загружена) — свои сочетания тоже
+    if (!_ef.hasFocus || _ec.readOnly) return false;
     return _onEditorKey(_ef, event) == KeyEventResult.handled;
   }
 

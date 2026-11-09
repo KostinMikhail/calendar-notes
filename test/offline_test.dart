@@ -644,4 +644,46 @@ void main() {
       expect(cross, 1);
     });
   });
+
+  group('ввод в редактор (noteEditable)', () {
+    test('открыт и загружен выбранный день — можно', () {
+      expect(noteEditable(loadedKey: '2026-11-08', targetKey: '2026-11-08'),
+          isTrue);
+      expect(noteEditable(loadedKey: 't:abc', targetKey: 't:abc'), isTrue);
+    });
+
+    test('ещё грузится или загрузка не удалась — нельзя', () {
+      expect(noteEditable(loadedKey: null, targetKey: '2026-11-08'), isFalse);
+    });
+
+    test('выбрали другой день, а в редакторе старый — нельзя', () {
+      expect(noteEditable(loadedKey: '2026-11-07', targetKey: '2026-11-08'),
+          isFalse);
+      expect(noteEditable(loadedKey: '2026-11-08', targetKey: 't:abc'),
+          isFalse);
+    });
+
+    test('выходим из аккаунта — нельзя', () {
+      expect(
+          noteEditable(
+              loadedKey: '2026-11-08',
+              targetKey: '2026-11-08',
+              signingOut: true),
+          isFalse);
+    });
+
+    test('где ввод разрешён, там разрешено и сохранение (и наоборот)', () {
+      for (final loaded in [null, 'a', 'b']) {
+        for (final target in ['a', 'b']) {
+          final canSave = shouldSaveDay(
+              loadedKey: loaded,
+              targetKey: target,
+              currentJson: 'x',
+              savedJson: 'y');
+          expect(noteEditable(loadedKey: loaded, targetKey: target), canSave,
+              reason: 'loaded=$loaded target=$target');
+        }
+      }
+    });
+  });
 }
