@@ -14,6 +14,7 @@ import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_quill/flutter_quill.dart' show Document;
 
+import 'limits.dart';
 import 'topics.dart' show topicKey;
 
 const String kBackupFormat = 'calendar-notes-backup';
@@ -35,10 +36,6 @@ final DateTime kBackupStart = DateTime(2026, 10, 1);
 
 /// Самый большой файл копии, который приложение согласится читать
 const int kMaxBackupBytes = 50 * 1024 * 1024;
-
-// Те же ограничения, что в firestore.rules — иначе запись отклонит сервер
-const int kMaxDeltaLength = 800000;
-const int kMaxTextLength = 200000;
 
 // Ограничения Firestore на одну пакетную запись: до 500 операций и 10 МиБ.
 // Берём с запасом.
@@ -204,11 +201,14 @@ void validateDelta(String delta, String where) {
 }
 
 void _checkNoteFields(String where, String delta, String text, String accent) {
-  if (delta.length > kMaxDeltaLength) {
+  if (delta.length > kMaxNoteDeltaLength) {
     throw BackupException('$where: заметка слишком большая');
   }
-  if (text.length > kMaxTextLength) {
+  if (text.length > kMaxNoteTextLength) {
     throw BackupException('$where: текст заметки слишком большой');
+  }
+  if (noteSizeProblem(delta, text) != null) {
+    throw BackupException('$where: заметка слишком большая');
   }
   if (!_accentRe.hasMatch(accent)) {
     throw BackupException('$where: неверный цвет блока «Не забыть»');
@@ -287,11 +287,14 @@ void _checkTopicFields(String where, BackupTopic t) {
   if (t.title.trim().isEmpty || t.title.length > kMaxTopicTitleLength) {
     throw BackupException('$where: неверное название');
   }
-  if (t.delta.length > kMaxDeltaLength) {
+  if (t.delta.length > kMaxNoteDeltaLength) {
     throw BackupException('$where: тема слишком большая');
   }
-  if (t.text.length > kMaxTextLength) {
+  if (t.text.length > kMaxNoteTextLength) {
     throw BackupException('$where: текст темы слишком большой');
+  }
+  if (noteSizeProblem(t.delta, t.text) != null) {
+    throw BackupException('$where: тема слишком большая');
   }
   validateDelta(t.delta, where);
 }

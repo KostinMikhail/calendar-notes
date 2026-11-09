@@ -24,6 +24,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 import 'package:flutter_quill/quill_delta.dart';
 
+import 'limits.dart';
 import 'motion.dart' show FadeSwitcher, Motion;
 import 'skins.dart' show currentSkin;
 import 'templates.dart'
@@ -417,10 +418,6 @@ List<TemplateLine>? removeTaskGroup(List<TemplateLine> lines, TaskGroup g) {
 //  Запись в заметку другого дня (транзакция)
 // ============================================================
 
-/// Ограничения правил Firestore для заметки
-const int kMaxNoteDeltaLength = 800000;
-const int kMaxNoteTextLength = 200000;
-
 /// Поля заметки дня (как в Firestore)
 @immutable
 class NoteData {
@@ -503,7 +500,7 @@ NoteData noteDataOf(List<TemplateLine> lines, String accent, String label) {
   final doc = lines.isEmpty ? Document() : Document.fromJson(linesToOps(lines));
   final delta = jsonEncode(doc.toDelta().toJson());
   final text = doc.toPlainText().replaceAll('￼', '');
-  if (delta.length > kMaxNoteDeltaLength || text.length > kMaxNoteTextLength) {
+  if (noteSizeProblem(delta, text) != null) {
     throw TaskCarryError('Заметка на $label слишком большая — перенос отменён');
   }
   return NoteData(delta: delta, text: text, accent: accent);

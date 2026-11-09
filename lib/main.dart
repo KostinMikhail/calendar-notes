@@ -20,6 +20,7 @@ import 'backup.dart';
 import 'dividers.dart';
 import 'firebase_options.dart';
 import 'format_menu.dart';
+import 'limits.dart';
 import 'motion.dart';
 import 'skins.dart';
 import 'spell/dictionary_dialog.dart';
@@ -1861,6 +1862,7 @@ class _CalendarPageState extends State<CalendarPage>
 
   Future<void> _loadNoteInner(DateTime day) async {
     final key = _dayKey(day);
+    _warnIfLeftTooBig(key);
     _setLoadedKey(null); // пока не загрузили — ни сохранять, ни вводить
     _unknownDay.value = false;
     final seq = ++_loadSeq;
@@ -1999,6 +2001,7 @@ class _CalendarPageState extends State<CalendarPage>
     final key = topicKey(id);
     _unwatchNote();
     _unknownDay.value = false;
+    _warnIfLeftTooBig(key);
     _setLoadedKey(null); // пока не загрузили — ни сохранять, ни вводить
     final seq = ++_loadSeq;
     if (_notes == null) return;
@@ -2104,6 +2107,16 @@ class _CalendarPageState extends State<CalendarPage>
     final topicId = topicIdOf(key);
     final plain = _controller.document.toPlainText().replaceAll('\uFFFC', '');
     final accent = _accent;
+    final payload = SavePayload(
+        json: json, text: plain, accent: topicId == null ? accent : null);
+    // больше предела — не пишем (сервер отклонит). Текст держим в памяти,
+    // пока его не сократят; автосохранение проверит снова, не отправляя
+    final tooBig = noteSizeProblem(json, plain);
+    if (tooBig != null) {
+      _saves.hold(key, payload, NoteTooBigError(tooBig));
+      _setStatus(noteTooBigText(tooBig));
+      return;
+    }
     _setStatus(kStatusSaving);
     Future<void> write;
     try {
@@ -2121,14 +2134,15 @@ class _CalendarPageState extends State<CalendarPage>
     }
     // запись в очереди (в локальной копии): эти правки уже сохранены
     _lastSavedJson = json;
+    // сократили — удержанный из-за размера текст больше не нужен
+    if (_saves.rejected(key)?.error is NoteTooBigError) _saves.forget(key);
     if (topicId != null) {
       _topics.touch(topicId);
       _searchCache.putTopicText(topicId, plain);
     } else {
       _searchCache.put(key, plain);
     }
-    final out = await _saves.track(key, write,
-        SavePayload(json: json, text: plain, accent: topicId == null ? accent : null));
+    final out = await _saves.track(key, write, payload);
     // пока ждали, открыли другое — статус того не трогаем
     if (!mounted || key != _targetKey || _loadedKey != key) return;
     if (out == SaveOutcome.acked) _setStatus(kStatusSaved);
@@ -2254,12 +2268,34 @@ class _CalendarPageState extends State<CalendarPage>
       _setStatus(kStatusSaved);
     }
     // копия только в памяти вкладки: закрытие вкладки потеряло бы очередь
-    setLeaveGuard(offlineCacheLimited && _saves.hasUnsynced);
+    // а слишком большая заметка не сохранена совсем — её текст только здесь
+    setLeaveGuard(
+        (offlineCacheLimited && _saves.hasUnsynced) || _saves.hasTooBig);
   }
 
-  String _saveErrorText(Object e) => e is FirebaseException
-      ? 'Ошибка сохранения (${e.code})'
-      : 'Ошибка сохранения';
+  String _saveErrorText(Object e) => e is NoteTooBigError
+      ? noteTooBigText(e.problem)
+      : e is FirebaseException
+          ? 'Ошибка сохранения (${e.code})'
+          : 'Ошибка сохранения';
+
+  /// Ушли с заметки, которая не сохраняется из-за размера: предупреждаем,
+  /// что её текст только в этой вкладке
+  void _warnIfLeftTooBig(String nextKey) {
+    final prev = _loadedKey;
+    if (prev == null || prev == nextKey || _signingOut) return;
+    if (_saves.rejected(prev)?.error is! NoteTooBigError) return;
+    final topicId = topicIdOf(prev);
+    final what = topicId != null
+        ? 'Тема «${_topics.byId(topicId)?.title ?? ''}» не сохранена'
+        : 'Заметка за ${formatRuDate(prev)} не сохранена';
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      duration: const Duration(seconds: 10),
+      content: Text('$what: она слишком большая. Текст не потерян, пока '
+          'открыта эта вкладка — вернитесь, сократите его, и он сохранится.'),
+    ),
+        snackBarAnimationStyle: Motion.snackBar);
+  }
 
   /// Сервер отклонил запись (сразу или когда появилась связь). Firestore
   /// убирает её из локальной копии; текст не теряем.

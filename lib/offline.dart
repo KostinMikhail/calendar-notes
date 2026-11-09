@@ -19,6 +19,8 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
+import 'limits.dart' show NoteTooBigError;
+
 import 'offline_web_stub.dart' if (dart.library.js_interop) 'offline_web.dart'
     as web;
 
@@ -266,6 +268,11 @@ class SaveTracker extends ChangeNotifier {
 
   bool get hasRejected => _rejected.isNotEmpty;
 
+  /// Есть заметки, которые не отправлялись из-за размера (их текст только
+  /// в памяти вкладки)
+  bool get hasTooBig =>
+      _rejected.values.any((r) => r.error is NoteTooBigError);
+
   /// У заметки есть неподтверждённая или отклонённая запись — пока так,
   /// изменения «из базы» для неё не применяем (иначе откат после отказа
   /// сервера стёр бы текст в редакторе)
@@ -290,6 +297,15 @@ class SaveTracker extends ChangeNotifier {
     onAcked = null;
     onRejected = null;
     super.dispose();
+  }
+
+  /// Запись не отправляли (например, заметка слишком большая) — держим
+  /// текст как отклонённый. Более ранние записи этой заметки его уже не
+  /// снимут: решает последняя. [onRejected] не вызывается.
+  void hold(String key, SavePayload payload, Object error) {
+    _latest[key] = ++_seq;
+    _rejected[key] = RejectedSave(payload, error);
+    notifyListeners();
   }
 
   /// [write] уже начата (уже в очереди Firestore). Ответ — не позже
