@@ -17,6 +17,7 @@
 // Блок задач — от строки «Задачи на день:» до разделителя или следующей
 // непустой строки без списка (заголовка следующего блока).
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -443,6 +444,51 @@ abstract class TaskNoteStore {
   Future<void> transact(String key, NoteData? Function(NoteData? current) modify);
 }
 
+// ---------- сколько ждать (аудит, F7/F9) ----------
+
+/// Транзакция переноса сдаётся сама — раньше, чем приложение перестаёт
+/// ждать ([kTaskStepWait]): иначе приложение сообщило бы об ошибке, а
+/// транзакция записалась бы позже
+const Duration kTaskTxTimeout = Duration(seconds: 15);
+
+/// Сколько приложение ждёт один шаг (перенос или отмена переноса)
+const Duration kTaskStepWait = Duration(seconds: 20);
+
+/// Сколько перед переносом ждём настройки шаблонов дня
+const Duration kTaskSettingsWait = Duration(seconds: 5);
+
+/// Сколько смена дня, тема, выход и резервная копия ждут конца переноса.
+/// Больше самого долгого переноса: настройки + отмена + перенос.
+const Duration kTaskIdleWait = Duration(seconds: 50);
+
+/// Ждёт, пока [busy] не станет false, но не дольше [max].
+/// true — дождались, false — время вышло.
+Future<bool> waitUntilIdle(
+  bool Function() busy, {
+  Duration max = kTaskIdleWait,
+  Duration step = const Duration(milliseconds: 100),
+}) async {
+  final clock = Stopwatch()..start();
+  while (busy()) {
+    if (clock.elapsed >= max) return false;
+    await Future<void>.delayed(step);
+  }
+  return true;
+}
+
+/// Сервер не ответил вовремя: шаг мог и записаться
+bool isTaskTimeout(Object e) =>
+    e is TimeoutException ||
+    (e is FirebaseException && e.code == 'deadline-exceeded');
+
+/// Текст, когда неизвестно, записался ли шаг. [label] — день, куда
+/// переносили (или откуда убирали копию).
+String taskTimeoutText({required bool carry, required String label}) => carry
+    ? 'Сервер не ответил вовремя. Проверьте $label: задача могла '
+        'перенестись. Повторное нажатие дубля не создаст.'
+    : 'Сервер не ответил вовремя. Проверьте $label: копия задачи могла '
+        'остаться там.';
+
 /// users/{uid}/notes. [notes] — null, если нет входа.
 class FirestoreTaskNoteStore implements TaskNoteStore {
   FirestoreTaskNoteStore(this.notes);
@@ -473,7 +519,7 @@ class FirestoreTaskNoteStore implements TaskNoteStore {
           'updatedAt': FieldValue.serverTimestamp(),
         });
       }
-    }, timeout: const Duration(seconds: 30));
+    }, timeout: kTaskTxTimeout);
   }
 }
 

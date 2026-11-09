@@ -1265,10 +1265,7 @@ class _CalendarPageState extends State<CalendarPage>
   /// Дожидается текущего сохранения и сохраняет несохранённые правки.
   /// false — правки сохранить не удалось.
   Future<bool> _flushPendingSave() async {
-    for (var i = 0; _taskBusy && i < 300; i++) {
-      await Future.delayed(const Duration(milliseconds: 100));
-    }
-    if (_taskBusy) return false;
+    if (!await waitUntilIdle(() => _taskBusy)) return false;
     if (_loadedKey == _targetKey && _isDirty) {
       await _saveNote();
     }
@@ -1675,9 +1672,7 @@ class _CalendarPageState extends State<CalendarPage>
     if (_signingOut) return;
 
     // сначала сохраняем последние правки (и дожидаемся переноса задачи)
-    while (_taskBusy) {
-      await Future.delayed(const Duration(milliseconds: 100));
-    }
+    if (!await _waitTaskIdle()) return;
     if (_loadedKey == _targetKey && _isDirty) {
       await _saveNote();
     }
@@ -2203,9 +2198,7 @@ class _CalendarPageState extends State<CalendarPage>
     if (_backupBusy) return; // идёт копия/восстановление
     // не теряем несохранённые правки предыдущего дня; перенос задачи
     // должен отметить задачу в этой же заметке — ждём и его
-    while (_taskBusy) {
-      await Future.delayed(const Duration(milliseconds: 100));
-    }
+    if (!await _waitTaskIdle()) return;
     // запись уходит в очередь сразу; ответ сервера не ждём (без связи
     // его может долго не быть)
     if (_loadedKey == _targetKey && _isDirty) unawaited(_saveNote());
@@ -2565,8 +2558,14 @@ class _CalendarPageState extends State<CalendarPage>
   @override
   bool get _taskOffline => _offline;
 
-  /// Перенос — транзакция: дольше ждать нельзя (смена дня ждёт переноса)
-  static const Duration _taskNetWait = Duration(seconds: 20);
+  /// Дождаться конца переноса задачи — не дольше [kTaskIdleWait].
+  /// false — перенос так и не закончился: действие не выполняем.
+  Future<bool> _waitTaskIdle() async {
+    if (!_taskBusy) return true;
+    if (await waitUntilIdle(() => _taskBusy)) return mounted;
+    _taskNotice('Перенос задачи ещё не закончился — попробуйте чуть позже');
+    return false;
+  }
 
   @override
   DateTime? get _taskNoteDate {
@@ -2626,15 +2625,20 @@ class _CalendarPageState extends State<CalendarPage>
     _taskBusy = true;
     _taskBusyLine.value = line;
     var message = '';
+    // какой шаг ждём сейчас — для текста, если сервер не ответит
+    String? waitLabel;
+    var waitCarry = false;
     try {
       // сначала другой день, потом отметка здесь: при ошибке задача
       // остаётся как была
       if (step.uncarry) {
         final targetKey = from.target!;
         final label = formatTaskDate(parseDayKey(targetKey)!);
+        waitLabel = label;
+        waitCarry = false;
         final out = await _taskCarrier
             .uncarry(targetKey: targetKey, group: group, label: label)
-            .timeout(_taskNetWait);
+            .timeout(kTaskStepWait);
         if (out == UncarryOutcome.removed) _searchCache.invalidate();
         if (out == UncarryOutcome.modified) {
           message = 'Задача на $label уже изменена и оставлена там';
@@ -2649,6 +2653,8 @@ class _CalendarPageState extends State<CalendarPage>
         final label = formatTaskDate(target);
         final settings = await _templateSettingsForDay();
         final (built, accent) = _composeDay(target, _pickAccent(), settings);
+        waitLabel = label;
+        waitCarry = true;
         await _taskCarrier.carry(
           targetKey: targetKey,
           group: group,
@@ -2657,7 +2663,7 @@ class _CalendarPageState extends State<CalendarPage>
               Map<String, dynamic>.from(op as Map),
           ], accent),
           label: label,
-        ).timeout(_taskNetWait);
+        ).timeout(kTaskStepWait);
         _searchCache.invalidate();
         next = TaskValue.carried(targetKey);
         message = carriedLabel(noteDate, target);
@@ -2676,14 +2682,20 @@ class _CalendarPageState extends State<CalendarPage>
       _autoSave();
     } on TaskCarryError catch (e) {
       _taskError(e.message);
-    } on FirebaseException catch (e) {
-      _taskError(step.carry
-          ? 'Не удалось перенести задачу (${e.code})'
-          : 'Не удалось отменить перенос (${e.code})');
-    } catch (_) {
-      _taskError(step.carry
-          ? 'Не удалось перенести задачу'
-          : 'Не удалось отменить перенос');
+    } catch (e) {
+      final label = waitLabel;
+      if (isTaskTimeout(e) && label != null) {
+        // неизвестно, записался ли шаг: отметку не ставим, просим проверить
+        _taskError(taskTimeoutText(carry: waitCarry, label: label));
+      } else if (e is FirebaseException) {
+        _taskError(step.carry
+            ? 'Не удалось перенести задачу (${e.code})'
+            : 'Не удалось отменить перенос (${e.code})');
+      } else {
+        _taskError(step.carry
+            ? 'Не удалось перенести задачу'
+            : 'Не удалось отменить перенос');
+      }
     } finally {
       _taskBusy = false;
       _taskBusyLine.value = null;
@@ -2814,7 +2826,7 @@ class _CalendarPageState extends State<CalendarPage>
     final loading = _templatesLoading;
     if (!_templatesLoaded && loading != null) {
       try {
-        await loading.timeout(const Duration(seconds: 5));
+        await loading.timeout(kTaskSettingsWait);
       } catch (_) {}
     }
     return _templateSettings;
@@ -2864,9 +2876,7 @@ class _CalendarPageState extends State<CalendarPage>
   /// дождаться сохранения и сохранить текущие правки)
   Future<void> _openTopic(String id) async {
     if (_backupBusy) return;
-    while (_taskBusy) {
-      await Future.delayed(const Duration(milliseconds: 100));
-    }
+    if (!await _waitTaskIdle()) return;
     // как при смене дня: запись в очереди сразу, сервер не ждём
     if (_loadedKey == _targetKey && _isDirty) unawaited(_saveNote());
     if (!mounted) return;

@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:calendar_notes/main.dart' show isWorkingDay;
 import 'package:calendar_notes/tasks.dart';
 import 'package:calendar_notes/templates.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 import 'package:flutter_quill/quill_delta.dart';
@@ -912,6 +914,66 @@ void main() {
       await pump(t, const TaskControls(value: TaskValue.open, inert: true));
       expect(find.byType(Tooltip), findsNothing);
       expect(find.byType(GestureDetector), findsNothing);
+    });
+  });
+
+  group('сколько ждать перенос (аудит, F7/F9)', () {
+    test('транзакция сдаётся раньше, чем приложение перестаёт ждать', () {
+      expect(kTaskTxTimeout, lessThan(kTaskStepWait));
+    });
+
+    test('ожидание конца переноса длиннее самого долгого переноса', () {
+      // настройки шаблонов + отмена переноса + перенос
+      expect(kTaskIdleWait,
+          greaterThan(kTaskSettingsWait + kTaskStepWait + kTaskStepWait));
+    });
+
+    test('waitUntilIdle: дождались', () async {
+      var busy = true;
+      Timer(const Duration(milliseconds: 60), () => busy = false);
+      final ok = await waitUntilIdle(() => busy,
+          max: const Duration(seconds: 2),
+          step: const Duration(milliseconds: 10));
+      expect(ok, isTrue);
+    });
+
+    test('waitUntilIdle: не занято — сразу true', () async {
+      final clock = Stopwatch()..start();
+      expect(await waitUntilIdle(() => false), isTrue);
+      expect(clock.elapsedMilliseconds, lessThan(50));
+    });
+
+    test('waitUntilIdle: время вышло — false, не висит', () async {
+      final clock = Stopwatch()..start();
+      final ok = await waitUntilIdle(() => true,
+          max: const Duration(milliseconds: 80),
+          step: const Duration(milliseconds: 10));
+      expect(ok, isFalse);
+      expect(clock.elapsedMilliseconds, lessThan(1000));
+    });
+
+    test('нет ответа сервера — отдельный случай', () {
+      expect(isTaskTimeout(TimeoutException('x')), isTrue);
+      expect(
+          isTaskTimeout(FirebaseException(
+              plugin: 'cloud_firestore', code: 'deadline-exceeded')),
+          isTrue);
+      expect(
+          isTaskTimeout(FirebaseException(
+              plugin: 'cloud_firestore', code: 'permission-denied')),
+          isFalse);
+      expect(isTaskTimeout(TaskCarryError('x')), isFalse);
+    });
+
+    test('текст при тайм-ауте называет день и не обещает ошибку', () {
+      final c = taskTimeoutText(carry: true, label: 'пт, 21 ноября');
+      expect(c, contains('пт, 21 ноября'));
+      expect(c, contains('могла перенестись'));
+      expect(c, contains('дубля не создаст'));
+      expect(c, isNot(contains('Не удалось')));
+      final u = taskTimeoutText(carry: false, label: 'пт, 21 ноября');
+      expect(u, contains('пт, 21 ноября'));
+      expect(u, contains('могла остаться'));
     });
   });
 }
