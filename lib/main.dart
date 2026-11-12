@@ -20,6 +20,7 @@ import 'backup.dart';
 import 'dividers.dart';
 import 'firebase_options.dart';
 import 'format_menu.dart';
+import 'images.dart';
 import 'responsive_layout.dart';
 import 'limits.dart';
 import 'motion.dart';
@@ -1093,6 +1094,8 @@ class _CalendarPageState extends State<CalendarPage>
     _autoTimer = Timer.periodic(const Duration(seconds: 5), (_) => _autoSave());
     // закрытие/перезагрузка вкладки: сразу ставим правки в очередь
     setBeforeUnloadHook(_onBeforeUnload);
+    // картинки, перетащенные на страницу, — в заметку
+    onImageDrops(_onDroppedImages);
   }
 
   @override
@@ -1104,6 +1107,7 @@ class _CalendarPageState extends State<CalendarPage>
     _download.dispose();
     _saves.dispose();
     listenBrowserOnline(null);
+    onImageDrops(null);
     _conn.dispose();
     _unknownDay.dispose();
     _revealSignal.dispose();
@@ -1427,6 +1431,29 @@ class _CalendarPageState extends State<CalendarPage>
       // личный словарь — тоже в копию (свежий из базы, иначе — из памяти)
       final dictionaryWords = await _spell.dictionary.exportWords();
 
+      // картинки, на которые ссылаются заметки и темы
+      final imageList = <BackupImage>[];
+      var imagesMissing = 0;
+      final imageIds = imageIdsForBackup(list, topicList);
+      final imagesCol = _imagesRef;
+      if (imageIds.isNotEmpty && imagesCol != null) {
+        for (final id in imageIds) {
+          try {
+            final r = await readDoc(imagesCol.doc(id),
+                offline: _offline || fromDevice,
+                timeout: const Duration(seconds: 30));
+            final img = imageForBackup(id, r.value?.data());
+            if (img == null) {
+              imagesMissing++;
+            } else {
+              imageList.add(img);
+            }
+          } catch (_) {
+            imagesMissing++;
+          }
+        }
+      }
+
       if (list.isEmpty && topicList.isEmpty && dictionaryWords.isEmpty) {
         await _showMessage('Нет заметок',
             'За период $period нет сохранённых заметок, тем тоже нет. '
@@ -1438,6 +1465,7 @@ class _CalendarPageState extends State<CalendarPage>
       final json = encodeBackup(list,
           topics: topicList,
           dictionary: dictionaryWords,
+          images: imageList,
           today: today,
           createdAtUtc: DateTime.now().toUtc());
       Uri? saved;
@@ -1464,6 +1492,8 @@ class _CalendarPageState extends State<CalendarPage>
               'Заметок: ${list.length}\n'
               'Тем: ${topicList.length}\n'
               '${dictionaryWords.isEmpty ? '' : 'Слов в личном словаре: ${dictionaryWords.length}\n'}'
+              '${imageList.isEmpty ? '' : 'Картинок: ${imageList.length}\n'}'
+              '${imagesMissing == 0 ? '' : 'Не удалось получить картинок: $imagesMissing (в заметках они останутся ссылками)\n'}'
               'Период: $period'
               '${fromDevice ? _deviceCopyNote() : ''}');
     } finally {
@@ -1487,6 +1517,7 @@ class _CalendarPageState extends State<CalendarPage>
             'Заметок в копии: ${data.notes.length}\n'
             '${data.topics.isEmpty ? '' : 'Тем в копии: ${data.topics.length}\n'}'
             '${data.dictionary.isEmpty ? '' : 'Слов личного словаря в копии: ${data.dictionary.length}\n'}'
+            '${data.images.isEmpty ? '' : 'Картинок в копии: ${data.images.length}\n'}'
             '\n'
             'Способ: перезапись.\n'
             '• Заметки за те же даты будут заменены версиями из копии.\n'
@@ -1659,7 +1690,31 @@ class _CalendarPageState extends State<CalendarPage>
         },
       );
 
-      final result = data.notes.isEmpty && data.topics.isEmpty
+      // картинки — раньше заметок (заметки сразу их покажут); есть уже —
+      // не трогаются. Не получилось — заметки не трогаем.
+      var imageNote = '';
+      String? imageError;
+      if (data.images.isNotEmpty) {
+        final col = _imagesRef;
+        try {
+          if (col == null) throw StateError('signed out');
+          final created =
+              await restoreImages(FirestoreImageStore(col), data.images);
+          imageNote = '\nКартинок восстановлено: $created'
+              '${created < data.images.length ? ' (остальные уже были)' : ''}.';
+        } catch (e) {
+          imageError =
+              'не удалось восстановить картинки — ${describeError(e)}';
+        }
+      }
+
+      final result = imageError != null
+          ? RestoreResult(
+              ok: false,
+              total: data.notes.length + data.topics.length,
+              written: 0,
+              error: imageError)
+          : data.notes.isEmpty && data.topics.isEmpty
           ? const RestoreResult(ok: true, total: 0, written: 0)
           : await runRestore(
               FirestoreNoteStore(notes, topics: _topicsRef),
@@ -1689,7 +1744,7 @@ class _CalendarPageState extends State<CalendarPage>
         await _showMessage(
             'Восстановление завершено',
             '${data.topics.isEmpty ? 'Восстановлено заметок: ${result.written} из ${result.total}.' : 'Восстановлено заметок: ${data.notes.length}, тем: ${data.topics.length}.'}'
-            '$dictionaryNote');
+            '$imageNote$dictionaryNote');
       } else {
         final String state;
         if (result.written == 0) {
@@ -1792,6 +1847,7 @@ class _CalendarPageState extends State<CalendarPage>
     _docIsDay = false;
     _unknownDay.value = false;
     _controller.document = Document();
+    _images.clear();
     _status.value = '';
 
     try {
@@ -2948,6 +3004,118 @@ class _CalendarPageState extends State<CalendarPage>
         onSaved: (s) => _templateSettings = s,
       ),
     );
+  }
+
+  /// Картинки вошедшего пользователя: users/{uid}/images
+  CollectionReference<Map<String, dynamic>>? get _imagesRef {
+    final user = FirebaseAuth.instance.currentUser;
+    if (_signingOut || user == null || user.uid != widget.uid) return null;
+    return _db.collection('users').doc(user.uid).collection('images');
+  }
+
+  // ---------- картинки в заметках (lib/images.dart) ----------
+
+  late final ImageStore _images = ImageStore(() => _imagesRef,
+      offline: () => _offline, onLateError: _onImageLateError);
+
+  late final List<EmbedBuilder> _pageEmbeds = [
+    const DividerEmbedBuilder(),
+    ImageEmbedBuilder(_images),
+  ];
+
+  @override
+  List<EmbedBuilder> get _embedBuilders => _pageEmbeds;
+
+  @override
+  bool get _acceptsImages => true;
+
+  bool _insertingImages = false;
+
+  static const String _kInsertingImage = 'Вставляю картинку…';
+
+  /// Картинки — в позицию курсора открытой заметки (дня или темы), каждая
+  /// отдельной строкой. Картинка сжимается в браузере и пишется отдельным
+  /// документом; в заметку идёт только ссылка (сохранится автосохранением).
+  @override
+  Future<void> _insertImages(List<(Uint8List, String)> files) async {
+    if (files.isEmpty || _insertingImages || _backupBusy || _signingOut) {
+      return;
+    }
+    final key = _loadedKey;
+    if (key == null || key != _targetKey || _controller.readOnly) {
+      _taskNotice('Картинку можно вставить, когда заметка загрузится');
+      return;
+    }
+    final doc = _controller.document;
+    _insertingImages = true;
+    _setStatus(_kInsertingImage);
+    var inserted = 0;
+    String? problem;
+    try {
+      for (final (bytes, mime) in files) {
+        final enc = await compressNoteImage(bytes, mime);
+        if (!mounted) return;
+        if (enc == null) {
+          problem = 'не удалось открыть или она слишком большая';
+          continue;
+        }
+        // пока сжимали, могли открыть другую заметку
+        if (_loadedKey != key ||
+            !identical(doc, _controller.document) ||
+            _controller.readOnly) {
+          problem = 'открыта другая заметка';
+          break;
+        }
+        final String id;
+        try {
+          id = _images.save(enc);
+        } catch (_) {
+          problem = 'нет входа';
+          break;
+        }
+        final sel = _controller.selection;
+        final at = sel.isValid ? sel.start : doc.length - 1;
+        final ins =
+            blockEmbedInsertOps(doc.toDelta().toJson(), at, imageEmbedOp(id));
+        _controller.compose(
+            Delta.fromJson(ins.ops), _controller.selection, ChangeSource.local);
+        _controller.updateSelection(
+          TextSelection.collapsed(
+              offset: ins.caret.clamp(0, _controller.document.length - 1)),
+          ChangeSource.local,
+        );
+        inserted++;
+      }
+    } finally {
+      _insertingImages = false;
+      if (mounted && _status.value == _kInsertingImage) _setStatus('');
+    }
+    if (problem != null) {
+      _taskNotice(inserted > 0
+          ? 'Вставлено картинок: $inserted, остальные — нет: $problem'
+          : 'Картинка не вставлена: $problem');
+    }
+  }
+
+  /// Файлы, брошенные на страницу
+  void _onDroppedImages(List<(Uint8List, String)> images, int others) {
+    if (!mounted || _signingOut) return;
+    if (!(ModalRoute.of(context)?.isCurrent ?? true)) {
+      _taskNotice('Закройте окно, чтобы вставить картинку');
+      return;
+    }
+    if (images.isEmpty) {
+      if (others > 0) _taskNotice('В заметку можно перетащить только картинки');
+      return;
+    }
+    _insertImages(images);
+    if (others > 0) _taskNotice('Не картинки пропущены: $others');
+  }
+
+  /// Сервер отклонил запись картинки (например, нет доступа)
+  void _onImageLateError(Object e) {
+    if (!mounted || _signingOut) return;
+    _taskNotice('Картинка не сохранилась: ${describeError(e)}');
   }
 
   /// Коллекция тем вошедшего пользователя: users/{uid}/topics

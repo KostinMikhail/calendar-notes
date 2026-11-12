@@ -56,7 +56,13 @@ const Map<String, dynamic> _dividerOp = {
 ///  • в середине — строка делится, обе части сохраняют её оформление
 ///    (например, пункт списка), разделитель между ними.
 /// Курсор встаёт на строку после разделителя.
-DividerInsert dividerInsertOps(List<dynamic> docOps, int offset) {
+DividerInsert dividerInsertOps(List<dynamic> docOps, int offset) =>
+    blockEmbedInsertOps(docOps, offset, _dividerOp);
+
+/// То же для любой вставки-объекта отдельной строкой ([embedOp] —
+/// операция вида {insert: {ключ: значение}}, например картинка)
+DividerInsert blockEmbedInsertOps(
+    List<dynamic> docOps, int offset, Map<String, dynamic> embedOp) {
   // текст документа (вставки-объекты — один символ) и оформление строк
   final plain = StringBuffer();
   final lineAttrs = <int, Map<String, dynamic>?>{}; // позиция '\n' → атрибуты
@@ -77,7 +83,7 @@ DividerInsert dividerInsertOps(List<dynamic> docOps, int offset) {
   }
   final text = plain.toString();
   if (text.isEmpty) {
-    return const DividerInsert([_dividerOp, {'insert': '\n'}], 2);
+    return DividerInsert([embedOp, {'insert': '\n'}], 2);
   }
   final o = offset.clamp(0, text.length - 1);
   final atLineStart = o == 0 || text[o - 1] == '\n';
@@ -86,14 +92,14 @@ DividerInsert dividerInsertOps(List<dynamic> docOps, int offset) {
   if (atLineStart) {
     return DividerInsert([
       if (o > 0) {'retain': o},
-      _dividerOp,
+      embedOp,
       {'insert': '\n'},
     ], o + 2);
   }
   if (atLineEnd && o != text.length - 1) {
     return DividerInsert([
       {'retain': o + 1},
-      _dividerOp,
+      embedOp,
       {'insert': '\n'},
     ], o + 3);
   }
@@ -107,7 +113,7 @@ DividerInsert dividerInsertOps(List<dynamic> docOps, int offset) {
       'insert': '\n',
       if (attrs != null && attrs.isNotEmpty) 'attributes': attrs,
     },
-    _dividerOp,
+    embedOp,
     {'insert': '\n'},
   ], o + 3);
 }

@@ -14,15 +14,25 @@ import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_quill/flutter_quill.dart' show Document;
 
+import 'images.dart'
+    show
+        EncodedImage,
+        encodedImageProblem,
+        imageIdsInDelta,
+        isValidImageId,
+        kImageMaxStoredSide,
+        kImageMimes,
+        kMaxImageDataLength;
 import 'limits.dart';
 import 'topics.dart' show topicKey;
 
 const String kBackupFormat = 'calendar-notes-backup';
 
 /// 1 — только заметки дней; 2 — плюс необязательный раздел topics;
-/// 3 — плюс необязательный раздел dictionary (личный словарь).
-/// Файлы версий 1 и 2 читаются как раньше.
-const int kBackupVersion = 3;
+/// 3 — плюс необязательный раздел dictionary (личный словарь);
+/// 4 — плюс необязательный раздел images (картинки из заметок и тем).
+/// Файлы прежних версий читаются как раньше.
+const int kBackupVersion = 4;
 
 /// Ограничения личного словаря (как в firestore.rules)
 const int kMaxBackupDictionaryWords = 5000;
@@ -35,7 +45,7 @@ final RegExp _topicIdRe = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
 final DateTime kBackupStart = DateTime(2026, 10, 1);
 
 /// Самый большой файл копии, который приложение согласится читать
-const int kMaxBackupBytes = 50 * 1024 * 1024;
+const int kMaxBackupBytes = 200 * 1024 * 1024; // с картинками
 
 // Ограничения Firestore на одну пакетную запись: до 500 операций и 10 МиБ.
 // Берём с запасом.
@@ -104,6 +114,83 @@ class BackupNote {
       };
 }
 
+/// Картинка в копии (users/{uid}/images/{id}); [data] — base64, как в базе
+class BackupImage {
+  const BackupImage({
+    required this.id,
+    required this.mime,
+    required this.width,
+    required this.height,
+    required this.data,
+  });
+
+  final String id;
+  final String mime;
+  final int width;
+  final int height;
+  final String data;
+
+  int get approxBytes => data.length + mime.length + 96;
+
+  Map<String, Object?> toJson() => {
+        'id': id,
+        'mime': mime,
+        'width': width,
+        'height': height,
+        'data': data,
+      };
+}
+
+/// Картинка из документа Firestore для копии (null — документ не подходит)
+BackupImage? imageForBackup(String id, Map<String, dynamic>? d) {
+  if (d == null || !isValidImageId(id)) return null;
+  final data = d['data'];
+  final mime = d['mime'];
+  final w = d['width'];
+  final h = d['height'];
+  if (data is! String || mime is! String || w is! int || h is! int) return null;
+  final img = BackupImage(id: id, mime: mime, width: w, height: h, data: data);
+  try {
+    _checkImage('Картинка', img);
+  } on BackupException {
+    return null;
+  }
+  return img;
+}
+
+void _checkImage(String where, BackupImage img) {
+  if (!isValidImageId(img.id)) {
+    throw BackupException('$where: неверный идентификатор картинки');
+  }
+  if (!kImageMimes.contains(img.mime)) {
+    throw BackupException('$where: неподдерживаемый формат картинки');
+  }
+  if (img.data.isEmpty || img.data.length > kMaxImageDataLength) {
+    throw BackupException('$where: картинка слишком большая или пустая');
+  }
+  if (img.width < 1 ||
+      img.height < 1 ||
+      img.width > kImageMaxStoredSide ||
+      img.height > kImageMaxStoredSide) {
+    throw BackupException('$where: неверный размер картинки');
+  }
+  try {
+    final bytes = base64Decode(img.data);
+    final problem = encodedImageProblem(EncodedImage(
+        bytes: bytes, mime: img.mime, width: img.width, height: img.height));
+    if (problem != null) throw BackupException('$where: $problem');
+  } on FormatException {
+    throw BackupException('$where: картинка повреждена');
+  }
+}
+
+/// id картинок, на которые ссылаются заметки и темы
+Set<String> imageIdsForBackup(
+    List<BackupNote> notes, List<BackupTopic> topics) => {
+      for (final n in notes) ...imageIdsInDelta(n.delta),
+      for (final t in topics) ...imageIdsInDelta(t.delta),
+    };
+
 /// Разобранная и проверенная копия
 class BackupData {
   const BackupData({
@@ -113,7 +200,12 @@ class BackupData {
     required this.notes,
     this.topics = const [],
     this.dictionary = const [],
+    this.images = const [],
   });
+
+  /// Картинки (только в файлах версии 4 и новее); восстанавливаются только
+  /// те, которых ещё нет (картинка в базе не меняется)
+  final List<BackupImage> images;
 
   final DateTime createdAt; // UTC
   final String from;
@@ -264,6 +356,7 @@ String encodeBackup(
   required DateTime createdAtUtc,
   List<BackupTopic> topics = const [],
   List<String> dictionary = const [],
+  List<BackupImage> images = const [],
 }) {
   final doc = {
     'format': kBackupFormat,
@@ -276,6 +369,7 @@ String encodeBackup(
     'notes': [for (final n in notes) n.toJson()],
     'topics': [for (final t in topics) t.toJson()],
     if (dictionary.isNotEmpty) 'dictionary': dictionary,
+    if (images.isNotEmpty) 'images': [for (final i in images) i.toJson()],
   };
   return const JsonEncoder.withIndent('  ').convert(doc);
 }
@@ -384,6 +478,8 @@ BackupData parseBackup(String source, {required DateTime today}) {
         if (version >= 2) 'topics',
         // личный словарь — с версии 3
         if (version >= 3) 'dictionary',
+        // картинки — с версии 4
+        if (version >= 4) 'images',
       },
       where);
 
@@ -492,13 +588,42 @@ BackupData parseBackup(String source, {required DateTime today}) {
         a.order != b.order ? a.order.compareTo(b.order) : a.id.compareTo(b.id));
   }
   final dictionary = _parseDictionary(root['dictionary'], where);
+  final images = _parseImages(root['images'], where);
   return BackupData(
       createdAt: createdAt.toUtc(),
       from: from,
       to: to,
       notes: notes,
       topics: topics,
-      dictionary: dictionary);
+      dictionary: dictionary,
+      images: images);
+}
+
+/// Раздел «images»: картинки (каждая проверяется целиком)
+List<BackupImage> _parseImages(Object? raw, String where) {
+  if (raw == null) return const [];
+  if (raw is! List) {
+    throw BackupException('$where: поле «images» неверного типа');
+  }
+  final seen = <String>{};
+  final out = <BackupImage>[];
+  for (var i = 0; i < raw.length; i++) {
+    final m = raw[i];
+    final at = 'Картинка №${i + 1}';
+    if (m is! Map) throw BackupException('$at: неверная структура');
+    _onlyKeys(m, {'id', 'mime', 'width', 'height', 'data'}, at);
+    final img = BackupImage(
+      id: _field<String>(m, 'id', at),
+      mime: _field<String>(m, 'mime', at),
+      width: _field<int>(m, 'width', at),
+      height: _field<int>(m, 'height', at),
+      data: _field<String>(m, 'data', at),
+    );
+    if (!seen.add(img.id)) throw BackupException('$at встречается дважды');
+    _checkImage(at, img);
+    out.add(img);
+  }
+  return out;
 }
 
 /// Раздел «dictionary»: список слов. Слова — в нижнем регистре, без повторов.
@@ -559,6 +684,79 @@ class NoteWrite {
 
   /// Ключ для отчёта: дата или `t:<id>`
   String get key => isTopic ? topicKey(date) : date;
+}
+
+/// Хранилище картинок для восстановления
+abstract class ImageRestoreStore {
+  /// Какие из этих картинок уже есть
+  Future<Set<String>> existing(List<String> ids);
+
+  /// Создать картинки (атомарно в пределах вызова)
+  Future<void> create(List<BackupImage> images);
+}
+
+/// Восстанавливает картинки, которых ещё нет (есть — не трогаются: картинка
+/// не меняется). Пакеты — в пределах лимитов Firestore. Возвращает число
+/// созданных; ошибка — исключение (созданные до ошибки остаются: лишняя
+/// картинка ничему не мешает).
+Future<int> restoreImages(ImageRestoreStore store, List<BackupImage> images,
+    {void Function(int done, int total)? onProgress}) async {
+  if (images.isEmpty) return 0;
+  final have = await store.existing([for (final i in images) i.id]);
+  final missing = [for (final i in images) if (!have.contains(i.id)) i];
+  var done = 0;
+  var batch = <BackupImage>[];
+  var bytes = 0;
+  Future<void> flush() async {
+    if (batch.isEmpty) return;
+    await store.create(batch);
+    done += batch.length;
+    onProgress?.call(done, missing.length);
+    batch = <BackupImage>[];
+    bytes = 0;
+  }
+
+  for (final img in missing) {
+    if (batch.isNotEmpty &&
+        (batch.length >= kMaxOpsPerBatch ||
+            bytes + img.approxBytes > kMaxBatchBytes)) {
+      await flush();
+    }
+    batch.add(img);
+    bytes += img.approxBytes;
+  }
+  await flush();
+  return done;
+}
+
+/// Картинки на Firestore: users/{uid}/images
+class FirestoreImageStore implements ImageRestoreStore {
+  FirestoreImageStore(this.images);
+  final CollectionReference<Map<String, dynamic>> images;
+
+  @override
+  Future<Set<String>> existing(List<String> ids) async {
+    final snaps = await Future.wait([
+      for (final id in ids)
+        images.doc(id).get(const GetOptions(source: Source.server)),
+    ]).timeout(const Duration(seconds: 120));
+    return {for (final s in snaps) if (s.exists) s.id};
+  }
+
+  @override
+  Future<void> create(List<BackupImage> list) async {
+    final batch = images.firestore.batch();
+    for (final i in list) {
+      batch.set(images.doc(i.id), {
+        'data': i.data,
+        'mime': i.mime,
+        'width': i.width,
+        'height': i.height,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    }
+    await batch.commit().timeout(const Duration(seconds: 120));
+  }
 }
 
 /// Хранилище заметок текущего пользователя

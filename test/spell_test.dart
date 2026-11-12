@@ -380,7 +380,7 @@ void main() {
           today: today,
           createdAtUtc: DateTime.utc(2026, 11, 8));
       final root = jsonDecode(json) as Map;
-      expect(root['version'], 3);
+      expect(root['version'], kBackupVersion);
       expect(root['dictionary'], ['вася', 'кострома']);
       final back = parseBackup(json, today: today);
       expect(back.dictionary, ['вася', 'кострома']);

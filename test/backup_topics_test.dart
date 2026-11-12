@@ -107,7 +107,7 @@ void main() {
         createdAtUtc: DateTime.utc(2026, 11, 5, 10),
       );
       final root = jsonDecode(json) as Map;
-      expect(root['version'], 3);
+      expect(root['version'], kBackupVersion);
       expect((root['topics'] as List).length, 2);
 
       final back = parseBackup(json, today: today);

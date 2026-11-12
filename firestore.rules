@@ -59,6 +59,27 @@ service cloud.firestore {
             || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['order']));
     }
 
+    // Картинка в заметке — users/{uid}/images/{id} (в заметке только ссылка
+    // 'img:<id>'): { data: base64 до 900000 символов, mime, width, height,
+    // createdAt: serverTimestamp }. Документ только создаётся и читается:
+    // менять картинку нельзя (новая картинка — новый документ).
+    function isValidImage(d) {
+      return d.keys().hasOnly(['data', 'mime', 'width', 'height', 'createdAt'])
+        && d.keys().hasAll(['data', 'mime', 'width', 'height', 'createdAt'])
+        && d.data is string && d.data.size() >= 1 && d.data.size() <= 900000
+        && d.mime in ['image/webp', 'image/jpeg', 'image/png']
+        && d.width is int && d.width >= 1 && d.width <= 4096
+        && d.height is int && d.height >= 1 && d.height <= 4096
+        && d.createdAt == request.time;
+    }
+
+    match /users/{userId}/images/{imageId} {
+      allow read, delete: if isOwner(userId);
+      allow create: if isOwner(userId)
+        && imageId.matches('^[A-Za-z0-9_-]{8,64}$')
+        && isValidImage(request.resource.data);
+    }
+
     // Настройки шаблонов дня — один документ users/{uid}/settings/templates:
     // { version: 1, weekdays: {"1".."7": delta}, blocks: {id: delta},
     //   updatedAt: serverTimestamp }. Приложение пишет его целиком (set).

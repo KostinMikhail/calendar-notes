@@ -21,6 +21,20 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
   int? _prevCaret;
   bool _snapping = false;
 
+  // ---------- картинки ----------
+
+  /// Вставки-объекты редактора: разделитель и картинка. Страница заметок
+  /// подставляет картинки из своей базы; в остальных редакторах (шаблоны)
+  /// картинка — заглушка.
+  List<EmbedBuilder> get _embedBuilders =>
+      const [DividerEmbedBuilder(), ImageEmbedBuilder(null)];
+
+  /// Редактор принимает картинки (Ctrl+V, перетаскивание)
+  bool get _acceptsImages => false;
+
+  /// Вставить картинки (байты файла и тип) в позицию курсора
+  Future<void> _insertImages(List<(Uint8List, String)> files) async {}
+
   // ---------- горячие клавиши ----------
 
   /// Глобальный перехват: срабатывает раньше, чем сам редактор,
@@ -216,7 +230,7 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
         placeholder: placeholder,
         padding: EdgeInsets.zero,
         expands: true,
-        embedBuilders: const [DividerEmbedBuilder()],
+        embedBuilders: _embedBuilders,
         // клик по ссылке — меню «Открыть / Изменить / Убрать ссылку»
         customRecognizerBuilder: _linkRecognizer,
         // тройной щелчок мышью — выделить строку целиком
@@ -520,6 +534,16 @@ mixin _EditorKit<T extends StatefulWidget> on State<T> {
       return;
     }
     if (!mounted) return;
+
+    // в буфере нет текста — может быть, там картинка (снимок экрана)
+    if ((text == null || text.trim().isEmpty) && _acceptsImages) {
+      final img = await clipboardImage();
+      if (!mounted) return;
+      if (img != null) {
+        if (identical(doc, _ec.document)) await _insertImages([img]);
+        return;
+      }
+    }
 
     final url = _asUrl(text);
     if (url != null) {
